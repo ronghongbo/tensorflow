@@ -351,7 +351,7 @@ struct CacheEntry {
 // Assume the cache is protected by the GIL.
 class CompiledFunctionCache {
  public:
-  static constexpr int kDefaultCapacity = 4096;
+  //static constexpr int kDefaultCapacity = 4096;
   explicit CompiledFunctionCache(int capacity);
 
   // Cache entries are shared_ptr<>s because it's possible the cache entry
@@ -1178,7 +1178,7 @@ py::object MakeCompiledFunction(py::function fun, py::function cache_miss,
       reinterpret_cast<JaxCompiledFunctionObject*>(obj.ptr());
   if (!cache) {
     cache = std::make_shared<CompiledFunctionCache>(
-        CompiledFunctionCache::kDefaultCapacity);
+        4096);//CompiledFunctionCache::kDefaultCapacity);
   }
   InitializeCompiledFunction(
       buf, std::move(fun), std::move(cache_miss), std::move(get_device),
@@ -1200,7 +1200,7 @@ void BuildJaxjitSubmodule(py::module& m) {
   py::class_<CompiledFunctionCache, std::shared_ptr<CompiledFunctionCache>>
       cache(jitlib, "CompiledFunctionCache");
   cache.def(py::init<int>(),
-            py::arg("capacity") = CompiledFunctionCache::kDefaultCapacity);
+            py::arg("capacity") = 4096);//CompiledFunctionCache::kDefaultCapacity);
   cache.def("size", &CompiledFunctionCache::Size);
   cache.def("capacity", &CompiledFunctionCache::Capacity);
   cache.def("clear", &CompiledFunctionCache::Clear);
