@@ -159,6 +159,8 @@ StreamExecutor::StreamExecutor(
     platform_kind_ = PlatformKind::kOpenCL;
   } else if (name == "host") {
     platform_kind_ = PlatformKind::kHost;
+  } else if (name == "plaidmlcpu") {
+    platform_kind_ = PlatformKind::kPlaidmlCpu;
   } else {
     platform_kind_ = PlatformKind::kInvalid;
   }

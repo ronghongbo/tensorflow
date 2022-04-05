@@ -349,6 +349,22 @@ cc_library(
     ]) + if_nccl([":nccl_plugin"]),
 )
 
+cc_library(
+    name = "plaidml_cpu_device",
+    srcs = ["plaidml_cpu_device.cc"],
+    hdrs = ["plaidml_cpu_device.h", "plaidml_device.h"],
+    compatible_with = [],
+    visibility = [":friends"],
+    deps = [
+        ":pjrt_stream_executor_client",
+        "//tensorflow/compiler/xla:statusor",
+        "//tensorflow/compiler/xla/client:client_library",
+        "//tensorflow/compiler/xla/plugin:plugin",
+        "//tensorflow/compiler/xla/service:platform_util",
+        "@com_google_absl//absl/strings",
+    ],
+)
+
 # We actually wish we could write if_cuda(if_nccl(...)) in :gpu_device,
 # but Bazel does not allow nested selects. We can work around the problem using
 # an intermediate library.

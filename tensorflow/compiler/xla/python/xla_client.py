@@ -52,6 +52,7 @@ mlir_api_version = 2
 xla_platform_names = {
     'cpu': 'Host',
     'gpu': 'CUDA',
+    'plaidml_cpu' : 'PlaidmlCpu',
 }
 
 
@@ -98,6 +99,8 @@ def make_gpu_client(distributed_client=None, node_id=0):
 def make_tpu_client():
   return _xla.get_tpu_client(max_inflight_computations=32)
 
+def make_plaidml_cpu_client():
+    return _xla.get_plaidml_cpu_client(asynchronous=True)
 
 class OpMetadata:
   """Python representation of a xla.OpMetadata protobuf."""

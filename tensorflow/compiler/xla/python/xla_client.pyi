@@ -82,6 +82,8 @@ def make_interpreter_client() -> Client:
 def make_tpu_client() -> Client:
   ...
 
+def make_plaidml_cpu_client() -> Client:
+  ...
 
 class OpMetadata:
 

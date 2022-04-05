@@ -194,6 +194,12 @@ PYBIND11_MODULE(xla_extension, m) {
             absl::StrJoin(device.coords(), ","), device.core_on_chip());
       });
 
+      py::class_<PlaidmlCpuDevice, PjRtDevice, ClientAndPtr<PlaidmlCpuDevice>>(
+      m, "PlaidmlCpuDevice")
+      .def("__repr__", [](const PlaidmlCpuDevice& device) {
+        return absl::StrFormat("PlaidmlCpuDevice(id=%i)", device.id());
+      });
+
   // Local XLA client methods.
 
   py::class_<GpuAllocatorConfig> alloc_config(m, "GpuAllocatorConfig");
@@ -309,6 +315,15 @@ PYBIND11_MODULE(xla_extension, m) {
         return std::make_shared<PyClient>(std::move(client));
       },
       py::arg("max_inflight_computations") = 32);
+  m.def(
+      "get_plaidml_cpu_client",
+      [](bool asynchronous) -> StatusOr<std::shared_ptr<PyClient>> {
+        py::gil_scoped_release gil_release;
+        TF_ASSIGN_OR_RETURN(std::unique_ptr<PjRtClient> client,
+                            GetPlaidmlCpuClient(asynchronous));
+        return std::make_shared<PyClient>(std::move(client));
+      },
+      py::arg("asynchronous") = true);
 
   TF_CHECK_OK(PyBuffer::RegisterTypes(m));
 

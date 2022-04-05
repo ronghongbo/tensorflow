@@ -45,6 +45,7 @@ enum class PlatformKind {
   kROCm,
   kOpenCL,
   kHost,
+  kPlaidmlCpu,
   kMock,
   kSize,
 };

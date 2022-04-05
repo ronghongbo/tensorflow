@@ -34,6 +34,8 @@ std::string PlatformKindString(PlatformKind kind) {
       return "OpenCL";
     case PlatformKind::kHost:
       return "Host";
+    case PlatformKind::kPlaidmlCpu:
+      return "PlaidmlCpu";      
     case PlatformKind::kMock:
       return "Mock";
     default:
@@ -57,6 +59,7 @@ bool PlatformIsRunnable(PlatformKind kind) {
     case PlatformKind::kROCm:
     case PlatformKind::kOpenCL:
     case PlatformKind::kHost:
+    case PlatformKind::kPlaidmlCpu:
       return true;
     default:
       return false;
@@ -68,6 +71,7 @@ bool PlatformIsRunnableOnDevice(PlatformKind kind) {
     case PlatformKind::kCuda:
     case PlatformKind::kROCm:
     case PlatformKind::kOpenCL:
+    case PlatformKind::kPlaidmlCpu:
       return true;
     default:
       return false;
