@@ -1,4 +1,4 @@
-/* Copyright 2020 The TensorFlow Authors. All Rights Reserved.
+/* Copyright 2016 The TensorFlow Authors. All Rights Reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -13,21 +13,12 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#ifndef TENSORFLOW_COMPILER_XLA_PJRT_PLAIDML_CPU_DEVICE_H_
-#define TENSORFLOW_COMPILER_XLA_PJRT_PLAIDML_CPU_DEVICE_H_
+#include "tensorflow/compiler/plugin/plaidml_plugin/plaidml_cpu_platform_id.h"
 
-#include "tensorflow/compiler/xla/pjrt/plaidml_device.h"
+namespace stream_executor {
+namespace cpu {
 
-namespace xla {
+PLATFORM_DEFINE_ID(kPlaidmlCpuPlatformId);
 
-class PlaidmlCpuDevice : public PlaidmlDevice {
- public:
-  PlaidmlCpuDevice(int id,
-                   std::unique_ptr<LocalDeviceState> local_device_state);
-};
-
-StatusOr<std::unique_ptr<PjRtClient>> GetPlaidmlCpuClient(bool asynchronous);
-
-}  // namespace xla
-
-#endif  // TENSORFLOW_COMPILER_XLA_PJRT_PLAIDML_CPU_DEVICE_H_
+}  // namespace cpu
+}  // namespace stream_executor
