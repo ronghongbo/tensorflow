@@ -30,6 +30,21 @@ limitations under the License.
 
 namespace xla {
 namespace cpu {
+struct RecipeInfo {
+  RecipeInfo(const RecipeInfo& r) { *this = r; }
+  RecipeInfo() {}
+  plaidml::exec::Executable plaidml_exe;
+  llvm::SmallVector<mlir::Type, 4> min_inputs;
+  llvm::SmallVector<mlir::Type, 4> max_inputs;
+  llvm::SmallVector<RecipeTensorInfo, 4> inputs;
+  llvm::SmallVector<RecipeTensorInfo, 4> outputs;
+  bool IsDynamicRecipe() { return min_inputs != max_inputs; }
+  bool IsDynamicTensor(unsigned i) {
+    assert(i < min_inputs.size() && "Index is out of range");
+    return min_inputs[i] != max_inputs[i];
+  }
+};
+
 // The compiler inherits the behavior of a CPU compiler. The major difference
 // is that after HLO optimization, in running the backend, the compiler would
 // emit MLIR Linalg dialect, and invoke the PlaidML compiler, which translates
