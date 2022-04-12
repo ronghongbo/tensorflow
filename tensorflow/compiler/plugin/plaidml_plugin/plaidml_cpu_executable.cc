@@ -52,14 +52,37 @@ namespace cpu {
 // and plaidml/core/core.h, instead of the Habana code, because this part is specific to
 // device and compiler.
 
-plaidml::TensorShape CreatPlaidmlTensorShape(PrimitiveType xt, const xla::Shape &shape) {
-  plaidml::DType plaidml_type = xlaTypeToPlaidmlType(shape.element_type());
+plaidml::TensorShape CreatPlaidmlTensorShape(PrimitiveType xla_type, const xla::Shape &shape) {
+  plaidml::DType plaidml_type = xlaTypeToPlaidmlType(xla_type);
   std::vector<int64_t> sizes;
   for (int i = 0; i < shape.rank(); i++) {
     sizes.push_back(shape.dimensions(i));
   }
   plaidml::TensorShape plaidml_tensor_shape(plaidml_type, sizes);
   return std::move(plaidml_tensor_shape);
+}
+
+std::vector<plaidml::Buffer> CreatePlaidmlBuffersFromShapeTree(const ShapeTree<MaybeOwningDeviceMemory>& shape_tree) {
+      std::vector<plaidml::Buffer> plaidml_buffers;
+      xla::Shape = shape_tree.shape();
+      plaidml::DType plaidml_type = XlaTypeToPlaidmlType(shape.element_type());
+      auto it = buffers.leaf_begin();
+      unit num_nodes = 0;
+      for (; in_it != buffers.leaf_end(); ++in_it) {
+        num_nodes++;
+      }
+      if (num_nodes != 1) {
+        return InternalError("Plaidml expects 1 buffer per argument");
+      }
+
+      se::DeviceMemoryBase device_memopry_base = in_it->second.AsDeviceMemoryBase();
+      char* data = (char *)device_memopry_base.opaque();
+      size_t size = (size_t) device_memopry_base.size();
+      plaidml::TensorShape plaidml_shape= CreatPlaidmlTensorShape(xt, argumentshape);  
+      plaidml::Buffer plaidml_buffer(data, size, plaidml_shape);
+      plaidml_input_buffers.push_back(plaidml_buffer);
+  }
+  return std::move(plaidml_input_buffers);
 }
 
 StatusOr<std::vector<plaidml::Buffer>> CreatePlaidmlInputBuffers(const std::vector<ExecutionInput> &arguments) {
@@ -78,7 +101,7 @@ StatusOr<std::vector<plaidml::Buffer>> CreatePlaidmlInputBuffers(const std::vect
       if (num_nodes != 1) {
         return InternalError("Plaidml expects 1 buffer per argument");
       }
-
+      const Shape& shape = in_it->second
       se::DeviceMemoryBase device_memopry_base = in_it->second.AsDeviceMemoryBase();
       char* data = (char *)device_memopry_base.opaque();
       size_t size = (size_t) device_memopry_base.size();
@@ -89,10 +112,26 @@ StatusOr<std::vector<plaidml::Buffer>> CreatePlaidmlInputBuffers(const std::vect
   return std::move(plaidml_input_buffers);
 }
 
-std::vector<plaidml::Buffer> CreatePlaidmlOutputs(ScopedShapedBuffer* result_) {
-  ShapeTree<se::DeviceMemoryBase>& buffers = result_->buffers();
-  std::vector<plaidml::Buffer> output_buffers = CreatePlaidmlBuffersFromShapeTree(plaidml_output_buffers, buffers);
-  return std::move(output_buffers);
+std::vector<plaidml::Buffer> CreatePlaidmlOutputs(ScopedShapedBuffer* result_, const xla::Shape& result_shape) {
+  std::vector<plaidml::Buffer> plaidml_output_buffers;
+  const ShapeTree<se::DeviceMemoryBase>& shape_tree = result_->buffers();
+  xla::Shape = shape_tree.shape();
+  xla::PrimitiveType xla_type = shape.element_type();
+  plaidml::DType plaidml_type = xlaTypeToPlaidmlType();
+
+  for (auto& p : shape_tree) {
+    const ShapeIndex& index = p.first;
+    const ShapeTree<se::DeviceMemoryBase>& sub_tree = shape_tree.SubShapeTree(index);
+    const Shape& sub_tree_shape = sub_tree.shape();
+    const se::DeviceMemoryBase& device_memopry_base = p.second.AsDeviceMemoryBase();
+    char* data = (char *)device_memopry_base.opaque();
+    size_t size = (size_t) device_memopry_base.size();
+    plaidml::TensorShape plaidml_shape= CreatPlaidmlTensorShape(xla_type, sub_tree_shape);  
+      plaidml::Buffer plaidml_buffer(data, size, plaidml_shape);
+      plaidml_output_buffers.push_back(plaidml_buffer);
+  }
+
+  return std::move(plaidml_output_buffers);
 }
 
 PlaidmlCpuExecutable::PlaidmlCpuExecutable(std::unique_ptr<HloModule> hlo_module)
@@ -138,10 +177,14 @@ StatusOr<ExecutionOutput> PlaidmlCpuExecutable::ExecuteAsyncOnStream(
       CreateResultShapedBuffer(run_options, absl::MakeSpan(buffers),
                                absl::MakeSpan(arguments)));
 
+  //HloInstruction* root = hlo_module_->entry_computation()->root_instruction();
+  //const Shape& root_shape = root->shape();
+
   // Now wrap the inputs and outputs into plaidml buffers and run the program.
   std::vector<plaidml::Buffer> plaidml_input_buffers = CreatePlaidmlInputBuffers(arguments);
   ScopedShapedBuffer* result_ = result.MutableResult();
-  std::vector<plaidml::Buffer> plaidml_output_buffers = CreatePlaidmlOutputBuffers(result_);
+  const xla::Shape& result_shape = this->result_shape(); 
+  std::vector<plaidml::Buffer> plaidml_output_buffers = CreatePlaidmlOutputBuffers(result_, result_shape);
     
   RecipeInfo& recipe_info = this->getRecipeInfo();
   //std::unique_ptr<plaidml::compiler::Program> plaidml_program = recipe_info.plaidml_program;
@@ -170,270 +213,7 @@ StatusOr<ExecutionOutput> PlaidmlCpuExecutable::ExecuteAsyncOnStream(
   return std::move(result);
 }
 
-StatusOr<ExecutionOutput> PlaidmlCpuExecutable::ExecuteAsyncOnStream(
-    const ServiceExecutableRunOptions* run_options,
-    std::vector<ExecutionInput> arguments,
-    HloExecutionProfile* hlo_execution_profile) {
-  TF_TRACE_SCOPE
-
-  if (GetRootValueSet().IsAmbiguous()) {
-    return Unimplemented("Points-to set of root instruction is ambiguous");
-  }
-
-  if (hlo_module_) {
-    const HloComputation* entry_comp = hlo_module_->entry_computation();
-    CHECK_EQ(entry_comp->num_parameters(), arguments.size())
-        << "Wrong number of arguments passed when running executable";
-    for (int64_t i = 0; i < entry_comp->num_parameters(); ++i) {
-      const Shape& expected_shape =
-          entry_comp->parameter_instruction(i)->shape();
-      const Shape& actual_shape = arguments[i].Buffers().shape();
-      TF_RET_CHECK(
-          ShapeUtil::DynamicShapeIsCompatible(actual_shape, expected_shape))
-          << "Shape mismatch on argument " << i << ", "
-          << expected_shape.ToString(/*print_layout=*/true) << " vs. "
-          << actual_shape.ToString(/*print_layout=*/true);
-    }
-  }
-
-  auto* host_stream = dynamic_cast<se::host::HostStream*>(
-      run_options->stream()->implementation());
-  se::Stream* stream = run_options->stream();
-  se::DeviceMemoryAllocator* memory_allocator = run_options->allocator();
-  RecipeInfo& recipe_info = this->getRecipeInfo();
-  std::unique_ptr<plaidml::compiler::Program> plaidml_program = recipe_info.plaidml_program;
-  std::unique_ptr<plaidml::exec::Executable> plaidml_exe = recipe_info.plaidml_exe;
-
-  // Prepare input and output buffers in the formats required by PlaidML
-    auto executable = exec::Executable(program);
-    executable.run(inputBuffers, outputBuffers);
-     input_buffers.push_back(BuildTensorBuffers(buffers));
-+      auto in_it = buffers.begin();
-+      auto out_it = argument_buffers.back().buffers().begin();
-+      for (; in_it != buffers.end();
-+          ++in_it, ++out_it) {  // do we execpt to see only a single buffer per
-+                                // argument?...
-+        out_it->second = in_it->second.AsDeviceMemoryBase();
-+
-+        persistentTensorInfo[pt].pTensorAddress =
-+            (uint64_t)out_it->second.opaque();
-+        persistentTensorInfo[pt].tensorType = DATA_TENSOR;
-+
-+        persistentTensorInfo[pt].tensorName =
-+            getRecipeInfo().inputs[pt].name.c_str();
-+        for (int i = 0; i < argument.shape().rank(); i++) {
-+          persistentTensorInfo[pt].tensorSize[i] = argument.shape().dimensions(i);
-+        }
-+        VLOG(1) << "buffer " << pt << " located at " << std::hex
-+                << (uint64_t)out_it->second.opaque() << " for buffer "
-+                << persistentTensorInfo[pt].tensorName;
-+        pt++;
-+      }
-+    }
-
-  const ShapeTree<MaybeOwningDeviceMemory>& Buffers() const { return buffers_; }
-
-
-  std::vector<Buffer> outputBuffers;
-
-+  int device_ordinal = run_options->device_ordinal();
-+  if (device_ordinal < 0) {
-+    device_ordinal = stream->parent()->device_ordinal();
-+  }
-
-
-    TF_ASSIGN_OR_RETURN(
-      std::vector<MaybeOwningDeviceMemory> buffers,
-      CreateBufferTable(memory_allocator, stream->parent()->device_ordinal(),
-                        arguments));
-
-  TF_ASSIGN_OR_RETURN(
-      ExecutionOutput result,
-      CreateResultShapedBuffer(run_options, absl::MakeSpan(buffers),
-                               absl::MakeSpan(arguments)));
-
-  auto inputShapes = plaidml_program.inputs();
-  ASSERT_EQ(inputs.size(), inputShapes.size());
-    for (size_t i = 0; i < inputs.size(); i++) {
-      std::visit(
-          [&](auto&& vec) {
-            Buffer buffer{vec, inputShapes[i]};
-            inputBuffers.emplace_back(buffer);
-          },
-          inputs[i]);
-    }
-
-    for (auto shape : program.outputs()) {
-      outputBuffers.emplace_back(shape);
-    }
-
-  struct AsyncRunTask {
-    PlaidmlCpuExecutable* executable;
-    ServiceExecutableRunOptions run_options;
-
-    Status operator()() {
-      return plaidml_exe->run(inputBuffers, outputBuffers);
-    }
-  };
-  host_stream->EnqueueTaskWithStatus(
-      AsyncRunTask{plaidml_exe, *run_options});
-
-  MarkToBeReleasedArguments(absl::MakeSpan(arguments), result);
-  return std::move(result);
-
-
-
-  se::Stream* stream = run_options->stream();
-  se::StreamExecutor* executor = stream->parent();
-  const se::Platform* platform = executor->platform();
-  se::hpu::XlaHpuExecutor* ex =
-      dynamic_cast<se::hpu::XlaHpuExecutor*>(executor->implementation());
-  synStreamHandle s = ex->getComputeStream();
-  se::hpu::HpuStream* hs =
-      dynamic_cast<se::hpu::HpuStream*>(stream->implementation());
-  hs->setStream(s, se::hpu::hs_compute);
-  synDeviceId devId = ex->getDevId();
-
-  VLOG(2) << "recieved " << arguments.size() << " arguments";
-  std::vector<ShapedBuffer> argument_buffers;
-  argument_buffers.reserve(arguments.size());
-  int device_ordinal = run_options->device_ordinal();
-  if (device_ordinal < 0) {
-    device_ordinal = stream->parent()->device_ordinal();
-  }
-
-  const char* env = getenv("HPU_NO_COMPILE");
-  if (env != nullptr) {
-    se::DeviceMemoryAllocator* memory_allocator = run_options->allocator();
-    TF_ASSIGN_OR_RETURN(se::OwningDeviceMemory out,
-                        memory_allocator->Allocate(
-                            device_ordinal, ShapeSizeBytes(result_shape())));
-
-    ScopedShapedBuffer scopedBuffer(result_shape(), run_options->allocator(),
-                                    device_ordinal);
-    scopedBuffer.set_buffer(std::move(out), {0});
-    ExecutionOutput result(std::move(scopedBuffer));
-    MarkToBeReleasedArguments(absl::MakeSpan(arguments), result);
-    return std::move(result);
-  }
-  uint64_t workspaceSize;
-  auto recipe = getRecipeInfo().recipe_handle;
-  CHECK_SYN1(synWorkspaceGetSize, &workspaceSize, recipe);
-
-  CHECK_LE(workspaceSize, se::hpu::HPU_WS);
-
-  uint64_t pWorkspace = ex->getWorkspacePtr();
-
-  // if (workspaceSize > 0) {
-  //   VLOG(1) << "allocating workspace on device. size=" << std::hex
-  //           << workspaceSize;
-
-  // se::OwningDeviceMemory workspace;
-  //   TF_ASSIGN_OR_RETURN(
-  //       workspace, memory_allocator->Allocate(device_ordinal,
-  //       workspaceSize));
-  //   pWorkspace = (uint64_t)workspace->opaque();
-  // }
-  se::DeviceMemoryAllocator* memory_allocator = run_options->allocator();
-  std::size_t num_outputs =
-      result_shape().IsTuple() ? result_shape().tuple_shapes_size() : 1;
-  synLaunchTensorInfo* persistentTensorInfo =
-      new synLaunchTensorInfo[arguments.size() + num_outputs];
-  std::vector<se::OwningDeviceMemory> output_tensors(num_outputs);
-  {
-    TF_TRACE_SCOPE_ACTIVITY("HPU::Patching")
-    uint32_t pt = 0;
-    for (auto& argument : arguments) {
-      const ShapeTree<MaybeOwningDeviceMemory>& buffers = argument.Buffers();
-      argument_buffers.push_back(ShapedBuffer(buffers.shape(), device_ordinal));
-      auto in_it = buffers.begin();
-      auto out_it = argument_buffers.back().buffers().begin();
-      for (; in_it != buffers.end();
-          ++in_it, ++out_it) {  // do we execpt to see only a single buffer per
-                                // argument?...
-        out_it->second = in_it->second.AsDeviceMemoryBase();
-
-        persistentTensorInfo[pt].pTensorAddress =
-            (uint64_t)out_it->second.opaque();
-        persistentTensorInfo[pt].tensorType = DATA_TENSOR;
-
-        persistentTensorInfo[pt].tensorName =
-            getRecipeInfo().inputs[pt].name.c_str();
-        for (int i = 0; i < argument.shape().rank(); i++) {
-          persistentTensorInfo[pt].tensorSize[i] = argument.shape().dimensions(i);
-        }
-        VLOG(1) << "buffer " << pt << " located at " << std::hex
-                << (uint64_t)out_it->second.opaque() << " for buffer "
-                << persistentTensorInfo[pt].tensorName;
-        pt++;
-      }
-    }
-
-    VLOG(2) << "now allocating buffer for result, num_outputs: " << num_outputs;
-
-    for (int i = 0; i < num_outputs; ++i, ++pt) {
-      const Shape& shape = result_shape().IsTuple()
-                              ? result_shape().tuple_shapes(i)
-                              : result_shape();
-      TF_ASSIGN_OR_RETURN(
-          output_tensors[i],
-          memory_allocator->Allocate(device_ordinal, ShapeSizeBytes(shape)));
-      VLOG(2) << "result tensor num is " << pt;
-      persistentTensorInfo[pt].pTensorAddress =
-          (uint64_t)output_tensors[i]->opaque();
-      persistentTensorInfo[pt].tensorName =
-          getRecipeInfo().outputs[i].name.c_str();
-      persistentTensorInfo[pt].tensorType = DATA_TENSOR;
-      for (int r = 0; r < shape.rank(); r++) {
-        persistentTensorInfo[pt].tensorSize[r] = shape.dimensions(r);
-      }
-    }
-  }
-
-  VLOG(2) << "calling synlaunch with  " << num_outputs + arguments.size()
-          << " tensors:";
-  if (VLOG_IS_ON(2)) {
-    for (int i = 0; i < num_outputs + arguments.size(); i++) {
-      VLOG(2) << i << "=" << &(persistentTensorInfo[i]) << " "
-              << persistentTensorInfo[i].tensorName << " at " << std::hex
-              << persistentTensorInfo[i].pTensorAddress << " type "
-              << persistentTensorInfo[i].tensorType;
-    }
-  }
-  {
-    // TODO: remove once synapse logger trace me implemented
-    TF_TRACE_SCOPE_ACTIVITY("HPU::SynLaunch")
-    CHECK_SYN1(synLaunch, s, persistentTensorInfo,
-               num_outputs + arguments.size(), pWorkspace, recipe,
-               SYN_FLAGS_TENSOR_NAME);
-    //TODO: uncomment as part of stream<->event design
-    hs->BlockUntilDone();
-  }
-
-  VLOG(2) << "after synLaunch";
-
-  ScopedShapedBuffer buffers(result_shape(), run_options->allocator(),
-                             device_ordinal);
-
-  if (result_shape().IsTuple()) {
-    for (int i = 0; i < num_outputs; ++i) {
-      buffers.set_buffer(std::move(output_tensors[i]), {i});
-    }
-  } else {
-    buffers.set_buffer(std::move(output_tensors[0]), {});
-  }
-
-  ExecutionOutput result(std::move(buffers));
-  VLOG(1) << "HPU: Execute " << module().name();
-  if (VLOG_IS_ON(2)) {
-    for (const auto& a : argument_buffers) {
-      VLOG(2) << "-- argument " << a;
-    }
-  }
-  MarkToBeReleasedArguments(absl::MakeSpan(arguments), result);
-  return std::move(result);
-}
-int64_t HpuExecutable::ShapeSizeBytes(const Shape& shape) {
+int64_t PlaidmlCpuExecutable::ShapeSizeBytes(const Shape& shape) {
   VLOG(2) << "ShapeSizeBytes called for shape " << shape.ToString();
   if (shape.IsOpaque()) {
     return sizeof(void*);

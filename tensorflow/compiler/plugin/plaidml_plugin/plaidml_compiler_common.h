@@ -63,7 +63,7 @@ struct RecipeInfo {
     ret = plaidml_type;                                  \
     break;
 
-plaidml::DType xlaTypeToPlaidmlType(PrimitiveType xt) {
+plaidml::DType XlaTypeToPlaidmlType(PrimitiveType xt) {
   plaidml::DType ret;
   switch (xt) {
     ELEMENTS_ATTR_TO_LITERAL(xla::PRED, PLAIDML_DATA_BOOLEAN)
