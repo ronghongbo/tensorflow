@@ -1,0 +1,61 @@
+Install the latest Miniconda3 from https://docs.conda.io/en/latest/miniconda.html
+  Example:
+      wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh
+      bash Miniconda3-latest-Linux-x86_64.sh
+      conda init  
+  Make sure to re-login so that the 'base' miniconda environment is activated. When you login, you should see (base) at the beginning of your prompt. Instead of re-login also this is possible:
+  eval "$([PATH_TO_ANACONDA]/bin/conda shell.bash hook)"
+
+Commands for building PlaidML:
+  git clone https://github.com/ronghongbo/plaidml.git --recursive -b plaidml-v1
+  cd plaidml/
+  ./configure --no_openvino --type=Debug
+  conda activate
+  ninja -C build-x86_64/Debug setup check-smoke
+  cd build-x86_64/Debug/
+  ninja pmlc-opt && bin/pmlc-opt ../../pmlc/target/x86/tests/reorder_layouts.mlir --split-input-file
+  ninja plaidml_edsl_tests_cc_test && bin/plaidml_edsl_tests_cc_test
+  ninja plaidbench_py && PYTHONPATH=$PWD KMP_AFFINITY=compact,granularity=fine,1 OMP_NUM_THREADS=56 python plaidbench/plaidbench.py -n1 keras resnet50 
+ 
+Commands for building TensorFlow:
+  git clone https://github.com/ronghongbo/tensorflow.git --recursive -b dd24786a398-that-works-with-keras-2.8.0
+  cd tensorflow/
+  ./configure
+  bazel build --force_pic --config=dbg //tensorflow/tools/pip_package:build_pip_package
+  ./bazel-bin/tensorflow/tools/pip_package/build_pip_package /tmp/tensorflow_pkg
+  pip install /tmp/tensorflow_pkg/tensorflow-2.9.0-cp39-cp39-linux_x86_64.whl   --force-reinstall
+  bazel test //tensorflow/...
+  bazel test //tensorflow/python/...
+
+Commands for building Jax:
+  git clone https://github.com/ronghongbo/jax.git
+  cd jax
+  conda create -n jax python=3.9.7
+  conda activate jax
+  python build/build.py
+  vi  bazel-jax//external/org_tensorflow/tensorflow/compiler/xla/python/jax_jit.cc
+  python build/build.py
+  pip install dist/jaxlib-0.3.3-cp39-none-manylinux2010_x86_64.whl 
+  pip install -e . 
+  pip install -r build/test-requirements.txt 
+  JAX_ENABLE_X64=1 JAX_NUM_GENERATED_CASES=25 pytest -n auto tests
+  python tests/lax_numpy_test.py --num_generated_cases=5
+  pytest tests/pmap_test.py
+
+To debug into xla from running Jax, for example:
+  cd examples/
+  py resnet50.py
+  gdb-oneapi python 
+    b xla::PyClient::CompileMlir
+    set directories ~/jax/bazel-jax
+    r resnet50.py
+
+To see all the changes so far:
+  cd jax; git diff 359b614b5f55b7b368e0f28c49388d682e1a4b89 > changes.txt
+  cd ../tensorflow; git diff 314377d1e21b63eb6b28afd27fde5ca700640950  >> changes.txt
+
+To copy tensorflow changes to the Jax directory for bazel build there:
+  cp :~/tensorflow/tensorflow/compiler/xla/python/jax_jit.cc ~/jax/bazel-jax/external/org_tensorflow/tensorflow/compiler/xla/python
+  ..... # Copy other files we added/changed as well. 
+TODO: there should be a better way: without manually copying the files from tensorflow to Jax, we may tell Jax where the local tensorflow is.
+

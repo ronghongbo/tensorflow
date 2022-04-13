@@ -53,7 +53,7 @@ namespace cpu {
 // device and compiler.
 
 plaidml::TensorShape CreatPlaidmlTensorShape(PrimitiveType xla_type, const xla::Shape &shape) {
-  plaidml::DType plaidml_type = xlaTypeToPlaidmlType(xla_type);
+  plaidml::DType plaidml_type = XlaTypeToPlaidmlType(xla_type);
   std::vector<int64_t> sizes;
   for (int i = 0; i < shape.rank(); i++) {
     sizes.push_back(shape.dimensions(i));
@@ -62,32 +62,9 @@ plaidml::TensorShape CreatPlaidmlTensorShape(PrimitiveType xla_type, const xla::
   return std::move(plaidml_tensor_shape);
 }
 
-std::vector<plaidml::Buffer> CreatePlaidmlBuffersFromShapeTree(const ShapeTree<MaybeOwningDeviceMemory>& shape_tree) {
-      std::vector<plaidml::Buffer> plaidml_buffers;
-      xla::Shape = shape_tree.shape();
-      plaidml::DType plaidml_type = XlaTypeToPlaidmlType(shape.element_type());
-      auto it = buffers.leaf_begin();
-      unit num_nodes = 0;
-      for (; in_it != buffers.leaf_end(); ++in_it) {
-        num_nodes++;
-      }
-      if (num_nodes != 1) {
-        return InternalError("Plaidml expects 1 buffer per argument");
-      }
-
-      se::DeviceMemoryBase device_memopry_base = in_it->second.AsDeviceMemoryBase();
-      char* data = (char *)device_memopry_base.opaque();
-      size_t size = (size_t) device_memopry_base.size();
-      plaidml::TensorShape plaidml_shape= CreatPlaidmlTensorShape(xt, argumentshape);  
-      plaidml::Buffer plaidml_buffer(data, size, plaidml_shape);
-      plaidml_input_buffers.push_back(plaidml_buffer);
-  }
-  return std::move(plaidml_input_buffers);
-}
-
 StatusOr<std::vector<plaidml::Buffer>> CreatePlaidmlInputBuffers(const std::vector<ExecutionInput> &arguments) {
-  std::vector<plaidml::Buffer> plaidml_input_buffers;
   VLOG(2) << "recieved " << arguments.size() << " arguments (execution inputs)";
+  std::vector<plaidml::Buffer> plaidml_input_buffers;
   plaidml_input_buffers.reserve(arguments.size());
   for (auto& argument : arguments) {
       const ShapeTree<MaybeOwningDeviceMemory>& buffers = argument.Buffers();
@@ -112,7 +89,7 @@ StatusOr<std::vector<plaidml::Buffer>> CreatePlaidmlInputBuffers(const std::vect
   return std::move(plaidml_input_buffers);
 }
 
-std::vector<plaidml::Buffer> CreatePlaidmlOutputs(ScopedShapedBuffer* result_, const xla::Shape& result_shape) {
+std::vector<plaidml::Buffer> CreatePlaidmlOutputBuffers(ScopedShapedBuffer* result_, const xla::Shape& result_shape) {
   std::vector<plaidml::Buffer> plaidml_output_buffers;
   const ShapeTree<se::DeviceMemoryBase>& shape_tree = result_->buffers();
   xla::Shape = shape_tree.shape();

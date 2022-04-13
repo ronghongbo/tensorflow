@@ -190,6 +190,7 @@ limitations under the License.
 
 // Include two data structures of Plaidml compiler: Program and Executable
 #include "plaidml/exec/exec.h"
+#include "plaidml/compiler/program.h"
 
 namespace xla {
 namespace cpu {
@@ -312,7 +313,7 @@ Status PlaidmlCpuCompiler::LowerMLIRModuleToLinalg(
   return Status::OK();
 }
 
-llvm::Expected<RecipeInfo> PlaidmlCpuCompiler::CompileLinalgToExecutable(
+RecipeInfo PlaidmlCpuCompiler::CompileLinalgToExecutable(
    OwningModuleRef mlir_module) {
     RecipeInfo recipe_info;
     std::unique_ptr<plaidml::compiler::Program> plaidml_program = make_unique<plaidml::compiler::Program>(mlir_module);

@@ -40,7 +40,7 @@ limitations under the License.
 namespace xla {
 namespace cpu {
 
-class PlaidmlCpuExecutable : public Executable {
+class PlaidmlCpuExecutable : public CpuExecutable {
  public:
   explicit PlaidmlCpuExecutable(std::unique_ptr<HloModule> hlo_module);
 
