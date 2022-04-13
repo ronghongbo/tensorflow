@@ -1,0 +1,1352 @@
+diff --git a/build/build.py b/build/build.py
+index 86125bd1..7b41bc74 100755
+--- a/build/build.py
++++ b/build/build.py
+@@ -514,7 +514,7 @@ def main():
+       config_args += ["--config=nonccl"]
+ 
+   command = ([bazel_path] + args.bazel_startup_options +
+-    ["run", "--verbose_failures=true"] + config_args +
++    ["run", "--verbose_failures=true", "--copt=-O0",  "--copt=-g"] + config_args +
+     [":build_wheel", "--",
+     f"--output_path={output_path}",
+     f"--cpu={wheel_cpu}"])
+diff --git a/jax/_src/lib/xla_bridge.py b/jax/_src/lib/xla_bridge.py
+index ce31408c..02be529d 100644
+--- a/jax/_src/lib/xla_bridge.py
++++ b/jax/_src/lib/xla_bridge.py
+@@ -222,6 +222,8 @@ register_backend_factory(
+ if iree is not None:
+   register_backend_factory("iree", iree.iree_client_factory, priority=-100)
+ 
++register_backend_factory('plaidml_cpu', xla_client.make_plaidml_cpu_client,
++                         priority=300)
+ 
+ def backends():
+   global _backends
+diff --git a/tensorflow/compiler/plugin/plaidml_plugin/plaidml_compiler_common.h b/tensorflow/compiler/plugin/plaidml_plugin/plaidml_compiler_common.h
+new file mode 100644
+index 00000000000..9a5d3abf2c6
+--- /dev/null
++++ b/tensorflow/compiler/plugin/plaidml_plugin/plaidml_compiler_common.h
+@@ -0,0 +1,93 @@
++/* Copyright 2017 The TensorFlow Authors. All Rights Reserved.
++
++Licensed under the Apache License, Version 2.0 (the "License");
++you may not use this file except in compliance with the License.
++You may obtain a copy of the License at
++
++    http://www.apache.org/licenses/LICENSE-2.0
++
++Unless required by applicable law or agreed to in writing, software
++distributed under the License is distributed on an "AS IS" BASIS,
++WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++See the License for the specific language governing permissions and
++limitations under the License.
++==============================================================================*/
++
++#ifndef TENSORFLOW_COMPILER_XLA_SERVICE_PLAIDML_COMPILER_COMMON_H_
++#define TENSORFLOW_COMPILER_XLA_SERVICE_PLAIDML_COMPILER_COMMON_H_
++
++#include <cstdint>
++#include <unordered_map>
++
++#include "llvm/ADT/SmallVector.h"
++#include "llvm/ADT/StringRef.h"
++#include "llvm/Support/Error.h"
++#include "mlir/IR/BuiltinAttributes.h"
++#include "mlir/IR/BuiltinTypes.h"
++
++namespace mlir {
++  class Operation;
++}
++
++using llvm::SmallVector;
++using llvm::Expected;
++namespace xla {
++namespace plaidml {
++
++using MultiBuffer = std::variant<   //
++    std::vector<half_float::half>,  //
++    std::vector<float>,             //
++    std::vector<double>,            //
++    std::vector<int8_t>,            //
++    std::vector<int16_t>,           //
++    std::vector<int32_t>,           //
++    std::vector<int64_t>,           //
++    std::vector<uint8_t>,           //
++    std::vector<uint16_t>,          //
++    std::vector<uint32_t>,          //
++    std::vector<uint64_t>>;
++
++using TensorBuffers = std::vector<MultiBuffer>;
++
++struct RecipeInfo {
++  RecipeInfo(const RecipeInfo& r) { *this = r; }
++  RecipeInfo() {}
++  std::unique_ptr<plaidml::Program > plaidml_program = nullptr;
++  std::unique_ptr<plaidml::exec::Executable> plaidml_exe = nullptr;
++//  TensorBuffers inputs;
++//  TensorBuffers outputs;
++};
++
++#define ELEMENTS_ATTR_TO_LITERAL(xla_type, plaidml_type) \
++  case xla_type:                                     \
++    ret = plaidml_type;                                  \
++    break;
++
++plaidml::DType XlaTypeToPlaidmlType(PrimitiveType xt) {
++  plaidml::DType ret;
++  switch (xt) {
++    ELEMENTS_ATTR_TO_LITERAL(xla::PRED, PLAIDML_DATA_BOOLEAN)
++    ELEMENTS_ATTR_TO_LITERAL(xla::F32, PLAIDML_DATA_FLOAT32)
++    ELEMENTS_ATTR_TO_LITERAL(xla::F64, PLAIDML_DATA_FLOAT64)
++    ELEMENTS_ATTR_TO_LITERAL(xla::S8, PLAIDML_DATA_INT8)
++    ELEMENTS_ATTR_TO_LITERAL(xla::S16, PLAIDML_DATA_INT16)
++    ELEMENTS_ATTR_TO_LITERAL(xla::S32, PLAIDML_DATA_INT32)
++    ELEMENTS_ATTR_TO_LITERAL(xla::S64, PLAIDML_DATA_INT64)
++    ELEMENTS_ATTR_TO_LITERAL(xla::U8, PLAIDML_DATA_UINT8)
++    ELEMENTS_ATTR_TO_LITERAL(xla::U16, PLAIDML_DATA_UINT16)
++    ELEMENTS_ATTR_TO_LITERAL(xla::U32, PLAIDML_DATA_UINT32)
++    ELEMENTS_ATTR_TO_LITERAL(xla::U64, PLAIDML_DATA_UINT64)
++    ELEMENTS_ATTR_TO_LITERAL(xla::C64, PLAIDML_DATA_INVALID)
++    ELEMENTS_ATTR_TO_LITERAL(xla::C128, PLAIDML_DATA_INVALID)
++    ELEMENTS_ATTR_TO_LITERAL(xla::F16, PLAIDML_DATA_FLOAT16)
++    ELEMENTS_ATTR_TO_LITERAL(xla::BF16, PLAIDML_DATA_INVALID)
++    default:
++      VLOG(0) << "Unknown type in conversion from xla to synapse!";
++      ret = syn_type_na;
++      break;
++  }
++  return ret;
++}
++
++} // namespace plaidml
++} // namespace xla
+diff --git a/tensorflow/compiler/plugin/plaidml_plugin/plaidml_cpu_compiler.cc b/tensorflow/compiler/plugin/plaidml_plugin/plaidml_cpu_compiler.cc
+new file mode 100644
+index 00000000000..1f5312991aa
+--- /dev/null
++++ b/tensorflow/compiler/plugin/plaidml_plugin/plaidml_cpu_compiler.cc
+@@ -0,0 +1,403 @@
++/* Copyright 2017 The TensorFlow Authors. All Rights Reserved.
++
++Licensed under the Apache License, Version 2.0 (the "License");
++you may not use this file except in compliance with the License.
++You may obtain a copy of the License at
++
++    http://www.apache.org/licenses/LICENSE-2.0
++
++Unless required by applicable law or agreed to in writing, software
++distributed under the License is distributed on an "AS IS" BASIS,
++WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++See the License for the specific language governing permissions and
++limitations under the License.
++==============================================================================*/
++
++#include "tensorflow/compiler/plugin/plaidml_plugin/plaidml_cpu_compiler.h"
++
++#include <stddef.h>
++#include <string.h>
++
++#include <functional>
++#include <map>
++#include <memory>
++#include <stack>
++#include <string>
++#include <tuple>
++#include <utility>
++#include <vector>
++
++// IWYU pragma: no_include "llvm/Config/Disassemblers.def.inc"
++// IWYU pragma: no_include "llvm/Config/Targets.def.inc"
++#include "absl/base/call_once.h"
++#include "absl/container/flat_hash_map.h"
++#include "absl/memory/memory.h"
++#include "absl/strings/str_cat.h"
++#include "llvm/ADT/ArrayRef.h"
++#include "llvm/ADT/STLExtras.h"
++#include "llvm/ADT/StringRef.h"
++#include "llvm/ADT/Triple.h"
++#include "llvm/IR/Function.h"
++#include "llvm/IR/LLVMContext.h"
++#include "llvm/IR/Mangler.h"
++#include "llvm/IR/Module.h"
++#include "llvm/IR/Verifier.h"
++#include "llvm/MC/TargetRegistry.h"
++#include "llvm/Object/ObjectFile.h"
++#include "llvm/Support/CodeGen.h"
++#include "llvm/Support/CommandLine.h"
++#include "llvm/Support/Error.h"
++#include "llvm/Support/TargetSelect.h"
++#include "llvm/Target/TargetMachine.h"
++#include "llvm/Target/TargetOptions.h"
++#include "mlir/Conversion/AffineToStandard/AffineToStandard.h"  // from @llvm-project
++#include "mlir/Conversion/ArithmeticToLLVM/ArithmeticToLLVM.h"  // from @llvm-project
++#include "mlir/Conversion/BufferizationToMemRef/BufferizationToMemRef.h"  // from @llvm-project
++#include "mlir/Conversion/FuncToLLVM/ConvertFuncToLLVMPass.h"  // from @llvm-project
++#include "mlir/Conversion/MathToLLVM/MathToLLVM.h"      // from @llvm-project
++#include "mlir/Conversion/MemRefToLLVM/MemRefToLLVM.h"  // from @llvm-project
++#include "mlir/Conversion/ReconcileUnrealizedCasts/ReconcileUnrealizedCasts.h"  // from @llvm-project
++#include "mlir/Conversion/SCFToControlFlow/SCFToControlFlow.h"  // from @llvm-project
++#include "mlir/Conversion/ShapeToStandard/ShapeToStandard.h"  // from @llvm-project
++#include "mlir/Conversion/VectorToSCF/VectorToSCF.h"       // from @llvm-project
++#include "mlir/Dialect/Affine/IR/AffineOps.h"              // from @llvm-project
++#include "mlir/Dialect/Arithmetic/IR/Arithmetic.h"         // from @llvm-project
++#include "mlir/Dialect/Arithmetic/Transforms/Passes.h"     // from @llvm-project
++#include "mlir/Dialect/Bufferization/Transforms/Passes.h"  // from @llvm-project
++#include "mlir/Dialect/Func/IR/FuncOps.h"                  // from @llvm-project
++#include "mlir/Dialect/Func/Transforms/Passes.h"           // from @llvm-project
++#include "mlir/Dialect/LLVMIR/LLVMDialect.h"               // from @llvm-project
++#include "mlir/Dialect/LLVMIR/LLVMTypes.h"                 // from @llvm-project
++#include "mlir/Dialect/Linalg/IR/Linalg.h"                 // from @llvm-project
++#include "mlir/Dialect/Linalg/Passes.h"                    // from @llvm-project
++#include "mlir/Dialect/MemRef/Transforms/Passes.h"         // from @llvm-project
++#include "mlir/Dialect/SCF/SCF.h"                          // from @llvm-project
++#include "mlir/Dialect/Shape/Transforms/Passes.h"          // from @llvm-project
++#include "mlir/Dialect/Tensor/IR/Tensor.h"                 // from @llvm-project
++#include "mlir/Dialect/Vector/IR/VectorOps.h"              // from @llvm-project
++#include "mlir/IR/Builders.h"                              // from @llvm-project
++#include "mlir/IR/BuiltinAttributes.h"                     // from @llvm-project
++#include "mlir/IR/BuiltinTypes.h"                          // from @llvm-project
++#include "mlir/IR/ImplicitLocOpBuilder.h"                  // from @llvm-project
++#include "mlir/InitAllDialects.h"                          // from @llvm-project
++#include "mlir/Pass/PassManager.h"                         // from @llvm-project
++#include "mlir/Target/LLVMIR/Dialect/LLVMIR/LLVMToLLVMIRTranslation.h"  // from @llvm-project
++#include "mlir/Target/LLVMIR/Export.h"                    // from @llvm-project
++#include "mlir/Target/LLVMIR/LLVMTranslationInterface.h"  // from @llvm-project
++#include "mlir/Transforms/Passes.h"                       // from @llvm-project
++#include "tensorflow/compiler/mlir/hlo/include/mlir-hlo/Dialect/mhlo/transforms/passes.h"
++#include "tensorflow/compiler/mlir/tools/kernel_gen/transforms/passes.h"
++#include "tensorflow/compiler/mlir/xla/hlo_to_mlir_hlo.h"
++#include "tensorflow/compiler/mlir/xla/ir/xla_framework.h"
++#include "tensorflow/compiler/mlir/xla/transforms/xla_passes.h"
++#include "tensorflow/compiler/plugin/plaidml_plugin/plaidml_cpu_executable.h"
++#include "tensorflow/compiler/xla/cpu_function_runtime.h"
++#include "tensorflow/compiler/xla/literal.h"
++#include "tensorflow/compiler/xla/map_util.h"
++#include "tensorflow/compiler/xla/protobuf_util.h"
++#include "tensorflow/compiler/xla/service/algebraic_simplifier.h"
++#include "tensorflow/compiler/xla/service/all_gather_decomposer.h"
++#include "tensorflow/compiler/xla/service/all_to_all_decomposer.h"
++#include "tensorflow/compiler/xla/service/batch_dot_simplification.h"
++#include "tensorflow/compiler/xla/service/batchnorm_expander.h"
++#include "tensorflow/compiler/xla/service/bfloat16_normalization.h"
++#include "tensorflow/compiler/xla/service/bitcast_dtypes_expander.h"
++#include "tensorflow/compiler/xla/service/buffer_assignment.h"
++#include "tensorflow/compiler/xla/service/call_inliner.h"
++#include "tensorflow/compiler/xla/service/cholesky_expander.h"
++#include "tensorflow/compiler/xla/service/comparison_expander.h"
++#include "tensorflow/compiler/xla/service/conditional_canonicalizer.h"
++#include "tensorflow/compiler/xla/service/conditional_simplifier.h"
++#include "tensorflow/compiler/xla/service/conditional_to_select.h"
++#include "tensorflow/compiler/xla/service/convolution_group_converter.h"
++#include "tensorflow/compiler/xla/service/copy_insertion.h"
++#include "tensorflow/compiler/xla/service/cpu/buffer_info_util.h"
++#include "tensorflow/compiler/xla/service/cpu/compiler_functor.h"
++#include "tensorflow/compiler/xla/service/cpu/conv_canonicalization.h"
++#include "tensorflow/compiler/xla/service/cpu/cpu_executable.h"
++#include "tensorflow/compiler/xla/service/cpu/cpu_instruction_fusion.h"
++#include "tensorflow/compiler/xla/service/cpu/cpu_layout_assignment.h"
++#include "tensorflow/compiler/xla/service/cpu/cpu_options.h"
++#include "tensorflow/compiler/xla/service/cpu/dot_op_emitter.h"
++#include "tensorflow/compiler/xla/service/cpu/ir_emission_utils.h"
++#include "tensorflow/compiler/xla/service/cpu/ir_emitter.h"
++#include "tensorflow/compiler/xla/service/cpu/parallel_task_assignment.h"
++#include "tensorflow/compiler/xla/service/cpu/simple_orc_jit.h"
++#include "tensorflow/compiler/xla/service/dfs_hlo_visitor_with_default.h"
++#include "tensorflow/compiler/xla/service/dot_decomposer.h"
++#include "tensorflow/compiler/xla/service/dump.h"
++#include "tensorflow/compiler/xla/service/dynamic_dimension_simplifier.h"
++#include "tensorflow/compiler/xla/service/dynamic_index_splitter.h"
++#include "tensorflow/compiler/xla/service/dynamic_padder.h"
++#include "tensorflow/compiler/xla/service/eigh_expander.h"
++#include "tensorflow/compiler/xla/service/flatten_call_graph.h"
++#include "tensorflow/compiler/xla/service/gather_expander.h"
++#include "tensorflow/compiler/xla/service/hlo.pb.h"
++#include "tensorflow/compiler/xla/service/hlo_casting_utils.h"
++#include "tensorflow/compiler/xla/service/hlo_computation.h"
++#include "tensorflow/compiler/xla/service/hlo_constant_folding.h"
++#include "tensorflow/compiler/xla/service/hlo_cse.h"
++#include "tensorflow/compiler/xla/service/hlo_dce.h"
++#include "tensorflow/compiler/xla/service/hlo_instruction.h"
++#include "tensorflow/compiler/xla/service/hlo_instructions.h"
++#include "tensorflow/compiler/xla/service/hlo_memory_scheduler.h"
++#include "tensorflow/compiler/xla/service/hlo_module.h"
++#include "tensorflow/compiler/xla/service/hlo_opcode.h"
++#include "tensorflow/compiler/xla/service/hlo_ordering.h"
++#include "tensorflow/compiler/xla/service/hlo_pass_fix.h"
++#include "tensorflow/compiler/xla/service/hlo_pass_pipeline.h"
++#include "tensorflow/compiler/xla/service/hlo_proto_util.h"
++#include "tensorflow/compiler/xla/service/hlo_subcomputation_unification.h"
++#include "tensorflow/compiler/xla/service/hlo_verifier.h"
++#include "tensorflow/compiler/xla/service/indexed_array_analysis.h"
++#include "tensorflow/compiler/xla/service/llvm_compiler.h"
++#include "tensorflow/compiler/xla/service/llvm_ir/llvm_command_line_options.h"
++#include "tensorflow/compiler/xla/service/llvm_ir/llvm_util.h"
++#include "tensorflow/compiler/xla/service/logistic_expander.h"
++#include "tensorflow/compiler/xla/service/map_inliner.h"
++#include "tensorflow/compiler/xla/service/operand_upcaster.h"
++#include "tensorflow/compiler/xla/service/optimization_barrier_expander.h"
++#include "tensorflow/compiler/xla/service/qr_expander.h"
++#include "tensorflow/compiler/xla/service/reduce_scatter_decomposer.h"
++#include "tensorflow/compiler/xla/service/reshape_mover.h"
++#include "tensorflow/compiler/xla/service/result_caster.h"
++#include "tensorflow/compiler/xla/service/rng_bit_generator_expander.h"
++#include "tensorflow/compiler/xla/service/rng_expander.h"
++#include "tensorflow/compiler/xla/service/scatter_expander.h"
++#include "tensorflow/compiler/xla/service/sharding_propagation.h"
++#include "tensorflow/compiler/xla/service/sharding_remover.h"
++#include "tensorflow/compiler/xla/service/slice_sinker.h"
++#include "tensorflow/compiler/xla/service/slow_operation_alarm.h"
++#include "tensorflow/compiler/xla/service/sort_simplifier.h"
++#include "tensorflow/compiler/xla/service/spmd/stateful_rng_spmd_partitioner.h"
++#include "tensorflow/compiler/xla/service/topk_rewriter.h"
++#include "tensorflow/compiler/xla/service/transpose_folding.h"
++#include "tensorflow/compiler/xla/service/tree_reduction_rewriter.h"
++#include "tensorflow/compiler/xla/service/triangular_solve_expander.h"
++#include "tensorflow/compiler/xla/service/tuple_simplifier.h"
++#include "tensorflow/compiler/xla/service/while_loop_constant_sinking.h"
++#include "tensorflow/compiler/xla/service/while_loop_invariant_code_motion.h"
++#include "tensorflow/compiler/xla/service/while_loop_simplifier.h"
++#include "tensorflow/compiler/xla/service/zero_sized_hlo_elimination.h"
++#include "tensorflow/compiler/xla/status_macros.h"
++#include "tensorflow/compiler/xla/statusor.h"
++#include "tensorflow/compiler/xla/types.h"
++#include "tensorflow/compiler/xla/util.h"
++#include "tensorflow/compiler/xla/xla_data.pb.h"
++#include "tensorflow/core/platform/errors.h"
++#include "tensorflow/core/platform/status.h"
++#include "tensorflow/core/protobuf/error_codes.pb.h"
++
++// Include two data structures of Plaidml compiler: Program and Executable
++#include "plaidml/compiler/program.h"
++#include "plaidml/exec/exec.h"
++
++namespace xla {
++namespace cpu {
++
++void DumpMlirToFile(const HloModule& hlo_module, string suffix,
++                    const ModuleOp& mlir_module) {
++  DumpToFileInDirOrStdout(hlo_module, TimestampFor(hlo_module),
++                          suffix + ".mlir", llvm_ir::DumpToString(mlir_module));
++}
++
++Status PlaidmlCpuCompiler::LowerMLIRModuleToLinalg(
++    const HloModule& hlo_module, mlir::ModuleOp mlir_module,
++    mlir::MLIRContext& mlir_context) {
++  TF_TRACE_SCOPE_ACTIVITY("Lower MHLO To Linalg")
++
++  mlir::PassManager pm(&mlir_context);
++
++  // Resolve all shape constraints (e.g. broadcast constraints that can be
++  // proved statically and changed to const witness) early to allow more
++  // efficient broadcast operations moving.
++  // Move up broadcasting operations to allow for more fusion opportunities.
++  pm.addPass(mlir::mhlo::CreateExpandHloTuplesPass("main"));
++  pm.addNestedPass<mlir::FuncOp>(mlir::mhlo::createLegalizeGeneralDotPass());
++  pm.addNestedPass<mlir::FuncOp>(mlir::mhlo::createBroadcastPropagationPass());
++  pm.addPass(mlir::createCSEPass());
++  pm.addPass(mlir::createCanonicalizerPass());
++
++  // Transform HLO operations to Linalg.
++  pm.addNestedPass<mlir::FuncOp>(mlir::mhlo::createLegalizeControlFlowPass());
++  pm.addNestedPass<mlir::FuncOp>(mlir::mhlo::createLegalizeHloToLinalgPass());
++
++  // Lower index cast on tensors to tensor.generate.
++  // pm.addNestedPass<mlir::FuncOp>(
++  //    mlir::kernel_gen::transforms::CreateLowerIndexCastPass());
++
++  // Lower shape dialect to standard to enable linalg canonicalizations (e.g.
++  // use linalg inputs instead of outputs for memref.dim operations).
++  // pm.addNestedPass<mlir::FuncOp>(
++  //    mlir::kernel_gen::transforms::CreateShapeSimplification());
++  // pm.addNestedPass<mlir::FuncOp>(mlir::createShapeToShapeLowering());
++  // pm.addPass(mlir::createConvertShapeToStandardPass());
++  // pm.addNestedPass<mlir::FuncOp>(mlir::createConvertShapeConstraintsPass());
++
++  // Fuse Linalg on tensors operations.
++  // pm.addPass(mlir::createCSEPass());
++  // pm.addPass(mlir::memref::createResolveShapedTypeResultDimsPass());
++  // pm.addPass(mlir::createCanonicalizerPass());
++  // pm.addNestedPass<mlir::FuncOp>(mlir::createLinalgElementwiseOpFusionPass());
++  // pm.addNestedPass<mlir::FuncOp>(mlir::createLinalgBufferizePass());
++  // pm.addNestedPass<mlir::FuncOp>(mlir::createConvertLinalgToLoopsPass());
++  // pm.addPass(mlir::createInlinerPass());
++
++  // Bufferize Linalg on tensors program.
++  // Always run canonicalizer (which does dead code removal) before
++  // bufferizing anything.
++  // pm.addPass(mlir::createCanonicalizerPass());
++  // Now bufferize all the compute operations (hlo + linalg) and func
++  // signature.
++  // pm.addPass(
++  //    mlir::kernel_gen::transforms::CreateComputeOpAndFuncBufferizePass());
++  // pm.addNestedPass<mlir::FuncOp>(
++  //    mlir::kernel_gen::transforms::CreateTiledLoopBufferizePass());
++  // Turn tensor constants into global memrefs.
++  // TODO(kramerb): Expose the patterns and add them to the bufferize passes.
++  // pm.addPass(mlir::createTensorConstantBufferizePass());
++  // Always run canonicalizer (which does dead code removal) before
++  // bufferizing anything.
++  // pm.addPass(mlir::createCanonicalizerPass());
++  // pm.addPass(mlir::kernel_gen::transforms::CreateFinalBufferizePass(
++  //    /*alignment=*/xla::cpu_function_runtime::Align()));
++  // pm.addPass(mlir::createCSEPass());
++  // pm.addPass(mlir::createCanonicalizerPass());
++  // pm.addPass(mlir::bufferization::createBufferResultsToOutParamsPass());
++  // pm.addPass(mlir::mhlo::CreateOutlineWithXLAFrameworkPass());
++
++  // Deallocate all temporary buffers.
++  // pm.addNestedPass<mlir::FuncOp>(
++  //    mlir::bufferization::createBufferDeallocationPass());
++
++  // pm.addPass(mlir::createBufferizationToMemRefPass());
++
++  // Specilize linalg.matmul to linalg.dot, linalg.matvec or linalg.vecmat,
++  // and immediately canonicalize to clean up not taken branches.
++  // pm.addNestedPass<mlir::FuncOp>(CreateLinalgMatmulSpecializationPass());
++  // pm.addPass(mlir::createCanonicalizerPass());
++
++  // Tile and vectorize linalg operation using Linalg Codegen Strategy.
++  // pm.addNestedPass<mlir::FuncOp>(CreateCodegenStrategyForMatMulPass());
++
++  // pm.addPass(mlir::createCSEPass());
++  // pm.addPass(mlir::createCanonicalizerPass());
++
++  // mlir::VectorTransferToSCFOptions vec_to_scf_options;
++  // vec_to_scf_options.unroll = true;
++  // pm.addNestedPass<mlir::FuncOp>(
++  //     mlir::createConvertVectorToSCFPass(vec_to_scf_options));
++  // pm.addNestedPass<mlir::FuncOp>(mlir::arith::createArithmeticExpandOpsPass());
++  // pm.addNestedPass<mlir::FuncOp>(mlir::memref::createExpandOpsPass());
++  // pm.addPass(mlir::mhlo::CreateLegalizeXLAFrameworkToLLVMPass());
++  // pm.addPass(mlir::createMemRefToLLVMPass());
++  // pm.addPass(mlir::createConvertSCFToCFPass());
++  // pm.addNestedPass<mlir::FuncOp>(mlir::createConvertMathToLLVMPass());
++  // pm.addNestedPass<mlir::FuncOp>(
++  //     mlir::arith::createConvertArithmeticToLLVMPass());
++  // pm.addPass(mlir::createLowerToLLVMPass());
++  // pm.addPass(mlir::createReconcileUnrealizedCastsPass());
++  if (pm.run(mlir_module).failed()) {
++    DumpMlirToFile(*hlo_module, "linalg", module.get());
++    return tensorflow::errors::Internal("Failed to lower MHLO into Linalg");
++  }
++
++  // Make @main private so it doesn't clash with other modules.
++  mlir_module->walk([&](mlir::LLVM::LLVMFuncOp f) {
++    if (f.getName() == "main") {
++      f.setLinkageAttr(mlir::LLVM::LinkageAttr::get(
++          f.getContext(), mlir::LLVM::Linkage::Private));
++    }
++  });
++
++  return Status::OK();
++}
++
++RecipeInfo PlaidmlCpuCompiler::CompileLinalgToExecutable(
++    OwningModuleRef mlir_module) {
++  RecipeInfo recipe_info;
++
++  // The construction of plaidml::Program is not as smooth as it should be.
++  // Maybe we should modify Plaidml interface a little bit to make this easy.
++  std::shared_ptr<pmlc::compiler::Program> p1 =
++      std::make_shared<pmlc::compiler::Program>(mlir_module);
++  struct plaidml_program p2 = { p1;
++}
++std::unique_ptr<struct plaidml_program> p3 =
++    std::make_unique<struct plaidml_program>(p2);
++std::unique_ptr<plaidml::Program> plaidml_program =
++    std::make_unique<plaidml::Program>(p3);
++
++// Compilation, which modifies the mlir_module in place.
++auto dump_dir = pmlc::util::getEnvVar("PLAIDML_DUMP");
++plaidml_program->compile("llvm_cpu", /*collectPasses*/ true, dump_dir);
++
++// Make an executable.
++std::unique_ptr<plaidml::exec::Executable> plaidml_exe =
++    make_unique<plaidml::exec::Executable>(*plaidml_program);
++recipe_info.plaidml_program = std::move(plaidml_program);
++recipe_info.plaidml_exe = std::move(plaidml_exe);
++return std::move(recipe_info);
++}
++
++StatusOr<std::unique_ptr<Executable>> PlaidmlCpuCompiler::RunBackend(
++    std::unique_ptr<HloModule> hlo_module, se::StreamExecutor* stream_exec,
++    const CompileOptions& options) {
++  TF_TRACE_SCOPE
++  TF_RET_CHECK(stream_exec != nullptr);
++
++  VLOG(1) << "PlaidmlCpuCompiler RunBackend: " << module->name();
++  XLA_SCOPED_LOGGING_TIMER(
++      absl::StrFormat("Compiling [%s] for CPU using JIT", module->name()));
++
++  // Prepare MLIR context
++  mlir::MLIRContext* context = new mlir::MLIRContext();
++  mlir::OwningModuleRef mlir_module =
++      mlir::ModuleOp::create(mlir::UnknownLoc::get(context));
++  context->loadAllAvailableDialects();
++
++  // Convert HLO into MLIR HLO
++  HloModule* clone = hlo_module->Clone().release();
++  auto status = ConvertHloToMlirHlo(mlir_module.get(), clone, true);
++  if (!status.ok()) {
++    LOG(ERROR) << "Failed to convert HLO to MLIR HLO: " << status;
++  }
++  free(clone);
++  DumpMlirToFile(*hlo_module, "mhlo", mlir_module.get());
++
++  // Convert MLIR HLO into MLIR Linalg
++  LowerMLIRModuleToLinalg(hlo_module, mlir_module, options);
++
++  // Invoke PlaidML compiler to compile MLIR Linalg into an executable,
++  // which is recorded in an recipe.
++  VLOG(2) << "Generating executable with PlaidML compiler";
++  auto recipeInfo = CompileLinalgToExecutable(mlir_module.release());
++  if (!recipeInfo) {
++    return InternalError("%s", llvm::toString(recipeInfo.takeError()));
++  }
++
++  // Create a PlaidmlCpuExecutable struct that contains two pieces of info:
++  // hlo_module and the recipe
++  std::unique_ptr<Executable> executable =
++      absl::make_unique<PlaidmlCpuExecutable>(std::move(hlo_module));
++  PlaidmlCpuExecutable* exec =
++      dynamic_cast<PlaidmlCpuExecutable*>(executable.get());
++  exec->setRecipeInfo(*recipeInfo);
++
++  return std::move(executable);
++}
++
++se::Platform::Id PlaidmlCpuCompiler::PlatformId() const {
++  return se::host::kPlaidmlCpuPlatformId;
++}
++
++}  // namespace cpu
++}  // namespace xla
++
++static bool InitModule() {
++  xla::Compiler::RegisterCompilerFactory(
++      stream_executor::host::kPlaidmlCpuPlatformId,
++      []() { return absl::make_unique<xla::cpu::PlaidmlCpuCompiler>(); });
++  return true;
++}
++static bool module_initialized = InitModule();
+diff --git a/tensorflow/compiler/plugin/plaidml_plugin/plaidml_cpu_compiler.h b/tensorflow/compiler/plugin/plaidml_plugin/plaidml_cpu_compiler.h
+new file mode 100644
+index 00000000000..830fad00f4c
+--- /dev/null
++++ b/tensorflow/compiler/plugin/plaidml_plugin/plaidml_cpu_compiler.h
+@@ -0,0 +1,67 @@
++/* Copyright 2017 The TensorFlow Authors. All Rights Reserved.
++
++Licensed under the Apache License, Version 2.0 (the "License");
++you may not use this file except in compliance with the License.
++You may obtain a copy of the License at
++
++    http://www.apache.org/licenses/LICENSE-2.0
++
++Unless required by applicable law or agreed to in writing, software
++distributed under the License is distributed on an "AS IS" BASIS,
++WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++See the License for the specific language governing permissions and
++limitations under the License.
++==============================================================================*/
++
++#ifndef TENSORFLOW_COMPILER_PLUGIN_PLAIDMLCPU_COMPILER_H_
++#define TENSORFLOW_COMPILER_PLUGIN_PLAIDMLCPU_COMPILER_H_
++
++#include <memory>
++
++#include "absl/types/span.h"
++#include "llvm/Target/TargetMachine.h"
++#include "tensorflow/compiler/plugin/plaidml_plugin/plaidml_compiler_common.h"
++#include "tensorflow/compiler/xla/cpu_function_runtime.h"
++#include "tensorflow/compiler/xla/service/cpu/target_machine_features.h"
++#include "tensorflow/compiler/xla/service/cpu_compiler.h"
++#include "tensorflow/compiler/xla/service/executable.h"
++#include "tensorflow/compiler/xla/service/hlo_module.h"
++#include "tensorflow/compiler/xla/statusor.h"
++#include "tensorflow/core/platform/stream_executor_no_cuda.h"
++
++namespace xla {
++namespace cpu {
++
++// This compiler inherits the behavior of a CPU compiler. The major difference
++// is that after HLO optimization, in running the backend, the compiler would
++// emit MLIR Linalg dialect, and invoke the PlaidML compiler, which translates
++// the emitted Linalg diact into LLVM IR and uses LLVM's JIT infrastructure to
++// create an executable "blob" that can then be returned wrapped in
++// CpuExecutable and actually invoked.
++class PlaidmlCpuCompiler : public CpuCompiler {
++ public:
++  PlaidmlCpuCompiler() { VLOG(1) << "PlaidML CPU Compiler constructed "; }
++  ~PlaidmlCpuCompiler() override {
++    VLOG(1) << "PlaidML CPU Compiler destructed ";
++  }
++
++  StatusOr<std::unique_ptr<Executable>> RunBackend(
++      std::unique_ptr<HloModule> module, se::StreamExecutor* stream_exec,
++      const CompileOptions& options) override;
++
++  se::Platform::Id PlatformId() const override;
++
++ private:
++  Status LowerMLIRModuleToLinalg(const HloModule& hlo_module,
++                                 mlir::ModuleOp mlir_module,
++                                 mlir::MLIRContext& mlir_context);
++
++  RecipeInfo CompileLinalgToExecutable(OwningModuleRef mlir_module);
++
++  TF_DISALLOW_COPY_AND_ASSIGN(PlaidmlCpuCompiler);
++};
++
++}  // namespace cpu
++}  // namespace xla
++
++#endif  // TENSORFLOW_COMPILER_PLUGIN_PLAIDMLCPU_COMPILER_H_
+diff --git a/tensorflow/compiler/plugin/plaidml_plugin/plaidml_cpu_executable.cc b/tensorflow/compiler/plugin/plaidml_plugin/plaidml_cpu_executable.cc
+new file mode 100644
+index 00000000000..3f0243acbbc
+--- /dev/null
++++ b/tensorflow/compiler/plugin/plaidml_plugin/plaidml_cpu_executable.cc
+@@ -0,0 +1,218 @@
++/* Copyright 2020 The TensorFlow Authors. All Rights Reserved.
++Licensed under the Apache License, Version 2.0 (the "License");
++you may not use this file except in compliance with the License.
++You may obtain a copy of the License at
++    http://www.apache.org/licenses/LICENSE-2.0
++Unless required by applicable law or agreed to in writing, software
++distributed under the License is distributed on an "AS IS" BASIS,
++WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++See the License for the specific language governing permissions and
++limitations under the License.
++==============================================================================*/
++#include "tensorflow/compiler/plugin/plaidml_plugin/plaidml_cpu_executable.h"
++
++#include <cstdint>
++#include <type_traits>
++#include <vector>
++
++#include "plaidml_cpu_executor.h"
++#include "plaidml_cpu_stream.h"
++#include "runtime_tracing.h"
++#include "tensorflow/compiler/xla/literal.h"
++#include "tensorflow/compiler/xla/service/buffer_assignment.h"
++#include "tensorflow/compiler/xla/service/computation_layout.h"
++#include "tensorflow/compiler/xla/service/hlo_computation.h"
++#include "tensorflow/compiler/xla/service/hlo_module.h"
++#include "tensorflow/compiler/xla/service/logical_buffer.h"
++#include "tensorflow/compiler/xla/service/maybe_owning_device_memory.h"
++#include "tensorflow/compiler/xla/service/shaped_buffer.h"
++#include "tensorflow/compiler/xla/service/transfer_manager.h"
++#include "tensorflow/compiler/xla/service/xla_debug_info_manager.h"
++#include "tensorflow/compiler/xla/shape_tree.h"
++#include "tensorflow/compiler/xla/shape_util.h"
++#include "tensorflow/compiler/xla/status_macros.h"
++#include "tensorflow/compiler/xla/types.h"
++#include "tensorflow/compiler/xla/util.h"
++#include "tensorflow/compiler/xla/xla_data.pb.h"
++#include "tensorflow/core/platform/env.h"
++#include "tensorflow/core/platform/logging.h"
++#include "tensorflow/core/platform/mem.h"
++#include "tensorflow/core/platform/mutex.h"
++#include "tensorflow/core/platform/types.h"
++#include "tensorflow/stream_executor/device_memory_allocator.h"
++#include "tensorflow/stream_executor/host/host_stream.h"
++#include "tensorflow/stream_executor/lib/statusor.h"
++#include "tensorflow/stream_executor/platform.h"
++#include "tensorflow/stream_executor/stream.h"
++#include "tensorflow/stream_executor/stream_executor_pimpl.h"
++namespace xla {
++namespace cpu {
++
++// Note: in this file, I followed
++// tensorflow/compiler/xla/service/cpu/cpu_executable.cc,
++// and plaidml/core/core.h, instead of the Habana code, because this part is
++// specific to device and compiler.
++
++plaidml::TensorShape CreatPlaidmlTensorShape(PrimitiveType xla_type,
++                                             const xla::Shape& shape) {
++  plaidml::DType plaidml_type = XlaTypeToPlaidmlType(xla_type);
++  std::vector<int64_t> sizes;
++  for (int i = 0; i < shape.rank(); i++) {
++    sizes.push_back(shape.dimensions(i));
++  }
++  plaidml::TensorShape plaidml_tensor_shape(plaidml_type, sizes);
++  return std::move(plaidml_tensor_shape);
++}
++
++StatusOr<std::vector<plaidml::Buffer>> CreatePlaidmlInputBuffers(
++    const std::vector<ExecutionInput>& arguments) {
++  VLOG(2) << "recieved " << arguments.size() << " arguments (execution inputs)";
++  std::vector<plaidml::Buffer> plaidml_input_buffers;
++  plaidml_input_buffers.reserve(arguments.size());
++  for (auto& argument : arguments) {
++    const ShapeTree<MaybeOwningDeviceMemory>& buffers = argument.Buffers();
++    xla::Shape shape = buffers.shape();
++    xla::PrimitiveType xla_type = shape.element_type();
++    auto itr = buffers.begin();
++    unit num_nodes = 0;
++    for (; itr != buffers.end(); ++itr) {
++      num_nodes++;
++    }
++    if (num_nodes != 1) {
++      return InternalError("Plaidml expects 1 buffer per argument");
++    }
++    se::DeviceMemoryBase device_memopry_base = itr->second.AsDeviceMemoryBase();
++    char* data = (char*)device_memopry_base.opaque();
++    size_t size = (size_t)device_memopry_base.size();
++    plaidml::TensorShape plaidml_shape =
++        CreatPlaidmlTensorShape(xla_type, shape);
++    plaidml::Buffer plaidml_buffer(data, size, plaidml_shape);
++    plaidml_input_buffers.emplace_back(plaidml_buffer);
++  }
++  return std::move(plaidml_input_buffers);
++}
++
++std::vector<plaidml::Buffer> CreatePlaidmlOutputBuffers(
++    ScopedShapedBuffer* result_, const xla::Shape& result_shape) {
++  std::vector<plaidml::Buffer> plaidml_output_buffers;
++  const ShapeTree<se::DeviceMemoryBase>& shape_tree = result_->buffers();
++  xla::Shape shape = shape_tree.shape();
++  xla::PrimitiveType xla_type = shape.element_type();
++  plaidml::DType plaidml_type = xlaTypeToPlaidmlType();
++  for (auto& p : shape_tree) {
++    const ShapeIndex& index = p.first;
++    const ShapeTree<se::DeviceMemoryBase>& sub_tree =
++        shape_tree.SubShapeTree(index);
++    const Shape& sub_tree_shape = sub_tree.shape();
++    const se::DeviceMemoryBase& device_memopry_base =
++        p.second.AsDeviceMemoryBase();
++    char* data = (char*)device_memopry_base.opaque();
++    size_t size = (size_t)device_memopry_base.size();
++    plaidml::TensorShape plaidml_shape =
++        CreatPlaidmlTensorShape(xla_type, sub_tree_shape);
++    plaidml::Buffer plaidml_buffer(data, size, plaidml_shape);
++    plaidml_output_buffers.push_back(plaidml_buffer);
++  }
++
++  return std::move(plaidml_output_buffers);
++}
++
++PlaidmlCpuExecutable::PlaidmlCpuExecutable(
++    std::unique_ptr<HloModule> hlo_module)
++    : CpuExecutable(std::move(hlo_module), /*hlo_profile_printer_data=*/nullptr,
++                    /*hlo_profile_index_map=*/nullptr) {}
++
++// This function is coined with CpuExecutable::ExecuteAsyncOnStream as
++// a reference.
++StatusOr<ExecutionOutput> PlaidmlCpuExecutable::ExecuteAsyncOnStream(
++    const ServiceExecutableRunOptions* run_options,
++    std::vector<ExecutionInput> arguments,
++    HloExecutionProfile* hlo_execution_profile) {
++  if (GetRootValueSet().IsAmbiguous()) {
++    return Unimplemented("Points-to set of root instruction is ambiguous");
++  }
++
++  if (hlo_module_) {
++    const HloComputation* entry_comp = hlo_module_->entry_computation();
++    CHECK_EQ(entry_comp->num_parameters(), arguments.size())
++        << "Wrong number of arguments passed when running executable";
++    for (int64_t i = 0; i < entry_comp->num_parameters(); ++i) {
++      const Shape& expected_shape =
++          entry_comp->parameter_instruction(i)->shape();
++      const Shape& actual_shape = arguments[i].Buffers().shape();
++      TF_RET_CHECK(
++          ShapeUtil::DynamicShapeIsCompatible(actual_shape, expected_shape))
++          << "Shape mismatch on argument " << i << ", "
++          << expected_shape.ToString(/*print_layout=*/true) << " vs. "
++          << actual_shape.ToString(/*print_layout=*/true);
++    }
++  }
++
++  auto* host_stream = dynamic_cast<se::host::HostStream*>(
++      run_options->stream()->implementation());
++  se::Stream* stream = run_options->stream();
++  se::DeviceMemoryAllocator* memory_allocator = run_options->allocator();
++  TF_ASSIGN_OR_RETURN(
++      std::vector<MaybeOwningDeviceMemory> buffers,
++      CreateBufferTable(memory_allocator, stream->parent()->device_ordinal(),
++                        arguments));
++
++  // Note: this code creates and then moves "result" into buffers.
++  TF_ASSIGN_OR_RETURN(
++      ExecutionOutput result,
++      CreateResultShapedBuffer(run_options, absl::MakeSpan(buffers),
++                               absl::MakeSpan(arguments)));
++
++  // HloInstruction* root =
++  // hlo_module_->entry_computation()->root_instruction();
++  // const Shape& root_shape = root->shape();
++
++  // Now wrap the inputs and outputs into plaidml buffers and run the program.
++  std::vector<plaidml::Buffer> plaidml_input_buffers =
++      CreatePlaidmlInputBuffers(arguments);
++  ScopedShapedBuffer* result_ = result.MutableResult();
++  const xla::Shape& result_shape = this->result_shape();
++  std::vector<plaidml::Buffer> plaidml_output_buffers =
++      CreatePlaidmlOutputBuffers(result_, result_shape);
++
++  RecipeInfo& recipe_info = this->getRecipeInfo();
++  // std::unique_ptr<plaidml::compiler::Program> plaidml_program =
++  // recipe_info.plaidml_program;
++  std::unique_ptr<plaidml::exec::Executable> plaidml_exe =
++      recipe_info.plaidml_exe;
++
++  struct AsyncRunTask {
++    plaidml::exec::Executable* plaidml_exe;
++    std::vector<plaidml::Buffer> plaidml_input_buffers;
++    std::vector<plaidml::Buffer> plaidml_output_buffers;
++    Status operator()() {
++      try {
++        double exec_time =
++            plaidml_exe->run(plaidml_input_buffers, plaidml_output_buffers);
++        VLOG(1) << "Execution time = " << exec_time << " ms\n";
++      } catch (...) {
++        return xla::Status(tensorflow::error::Code::ABORTED,
++                           "Error in executing Plaidml executable");
++      }
++    }
++  };
++  host_stream->EnqueueTaskWithStatus(
++      AsyncRunTask{plaidml_exe, plaidml_input_buffers, plaidml_output_buffers});
++
++  // Since the result's memory is shared by the two variables:
++  // "plaidml_output_buffers" and "result", the execution of the task should
++  // have changed the memory of "plaidml_output_buffers" and thus
++  // of "result". Now return the "result".
++  MarkToBeReleasedArguments(absl::MakeSpan(arguments), result);
++  return std::move(result);
++}
++
++int64_t PlaidmlCpuExecutable::ShapeSizeBytes(const Shape& shape) {
++  VLOG(2) << "ShapeSizeBytes called for shape " << shape.ToString();
++  if (shape.IsOpaque()) {
++    return sizeof(void*);
++  }
++  return ShapeUtil::ByteSizeOf(shape, sizeof(void*));
++}
++}  // namespace cpu
++}  // namespace xla
+diff --git a/tensorflow/compiler/plugin/plaidml_plugin/plaidml_cpu_executable.h b/tensorflow/compiler/plugin/plaidml_plugin/plaidml_cpu_executable.h
+new file mode 100644
+index 00000000000..4a857fd669e
+--- /dev/null
++++ b/tensorflow/compiler/plugin/plaidml_plugin/plaidml_cpu_executable.h
+@@ -0,0 +1,67 @@
++/* Copyright 2017 The TensorFlow Authors. All Rights Reserved.
++
++Licensed under the Apache License, Version 2.0 (the "License");
++you may not use this file except in compliance with the License.
++You may obtain a copy of the License at
++
++    http://www.apache.org/licenses/LICENSE-2.0
++
++Unless required by applicable law or agreed to in writing, software
++distributed under the License is distributed on an "AS IS" BASIS,
++WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++See the License for the specific language governing permissions and
++limitations under the License.
++==============================================================================*/
++
++#ifndef TENSORFLOW_COMPILER_XLA_SERVICE_PLAIDML_CPU_EXECUTABLE_H_
++#define TENSORFLOW_COMPILER_XLA_SERVICE_PLAIDML_CPU_EXECUTABLE_H_
++
++#include <cstddef>
++#include <memory>
++#include <string>
++#include <vector>
++
++#include "absl/types/span.h"
++#include "plaidml/pmlc/compiler/program.h"
++#include "tensorflow/compiler/xla/service/buffer_assignment.h"
++#include "tensorflow/compiler/xla/service/cpu/simple_orc_jit.h"
++#include "tensorflow/compiler/xla/service/custom_call_status_internal.h"
++#include "tensorflow/compiler/xla/service/executable.h"
++#include "tensorflow/compiler/xla/service/hlo_dataflow_analysis.h"
++#include "tensorflow/compiler/xla/service/hlo_execution_profile.h"
++#include "tensorflow/compiler/xla/service/hlo_instruction.h"
++#include "tensorflow/compiler/xla/service/hlo_module.h"
++#include "tensorflow/compiler/xla/service/shaped_buffer.h"
++#include "tensorflow/compiler/xla/statusor.h"
++#include "tensorflow/compiler/xla/types.h"
++#include "tensorflow/core/platform/stream_executor_no_cuda.h"
++#include "tensorflow/stream_executor/device_memory_allocator.h"
++
++namespace xla {
++namespace cpu {
++
++// Here I inherit from Executable instead of CpuExecutable, because
++// CpuExecutable's constructor requires a SimpleOrcJIT as an argument, but
++// Plaidml compiler is not a SimpleOrcJIT.
++class PlaidmlCpuExecutable : public Executable {
++ public:
++  explicit PlaidmlCpuExecutable(std::unique_ptr<HloModule> hlo_module);
++
++  StatusOr<ExecutionOutput> ExecuteAsyncOnStream(
++      const ServiceExecutableRunOptions* run_options,
++      std::vector<ExecutionInput> arguments,
++      HloExecutionProfile* hlo_execution_profile) override;
++  static int64_t ShapeSizeBytes(const Shape& shape);
++  RecipeInfo& getRecipeInfo() { return recipe_info_; }
++  void setRecipeInfo(RecipeInfo& recipe_info) { recipe_info_ = recipe_info; }
++
++ private:
++  RecipeInfo recipe_info_;
++
++  TF_DISALLOW_COPY_AND_ASSIGN(PlaidmlCpuExecutable);
++};
++
++}  // namespace cpu
++}  // namespace xla
++
++#endif  // TENSORFLOW_COMPILER_XLA_SERVICE_PLAIDML_CPU_EXECUTABLE_H_
+diff --git a/tensorflow/compiler/plugin/plaidml_plugin/plaidml_cpu_platform_id.cc b/tensorflow/compiler/plugin/plaidml_plugin/plaidml_cpu_platform_id.cc
+new file mode 100644
+index 00000000000..b8bf51b0989
+--- /dev/null
++++ b/tensorflow/compiler/plugin/plaidml_plugin/plaidml_cpu_platform_id.cc
+@@ -0,0 +1,24 @@
++/* Copyright 2016 The TensorFlow Authors. All Rights Reserved.
++
++Licensed under the Apache License, Version 2.0 (the "License");
++you may not use this file except in compliance with the License.
++You may obtain a copy of the License at
++
++    http://www.apache.org/licenses/LICENSE-2.0
++
++Unless required by applicable law or agreed to in writing, software
++distributed under the License is distributed on an "AS IS" BASIS,
++WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++See the License for the specific language governing permissions and
++limitations under the License.
++==============================================================================*/
++
++#include "tensorflow/compiler/plugin/plaidml_plugin/plaidml_cpu_platform_id.h"
++
++namespace stream_executor {
++namespace cpu {
++
++PLATFORM_DEFINE_ID(kPlaidmlCpuPlatformId);
++
++}  // namespace cpu
++}  // namespace stream_executor
+diff --git a/tensorflow/compiler/plugin/plaidml_plugin/plaidml_cpu_platform_id.h b/tensorflow/compiler/plugin/plaidml_plugin/plaidml_cpu_platform_id.h
+new file mode 100644
+index 00000000000..9e190aa933b
+--- /dev/null
++++ b/tensorflow/compiler/plugin/plaidml_plugin/plaidml_cpu_platform_id.h
+@@ -0,0 +1,34 @@
++/* Copyright 2016 The TensorFlow Authors. All Rights Reserved.
++
++Licensed under the Apache License, Version 2.0 (the "License");
++you may not use this file except in compliance with the License.
++You may obtain a copy of the License at
++
++    http://www.apache.org/licenses/LICENSE-2.0
++
++Unless required by applicable law or agreed to in writing, software
++distributed under the License is distributed on an "AS IS" BASIS,
++WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++See the License for the specific language governing permissions and
++limitations under the License.
++==============================================================================*/
++
++#ifndef TENSORFLOW_STREAM_EXECUTOR_PLAIDML_CPU_PLATFORM_ID_H_
++#define TENSORFLOW_STREAM_EXECUTOR_PLAIDML_CPU_PLATFORM_ID_H_
++
++#include "tensorflow/stream_executor/platform.h"
++
++namespace stream_executor {
++namespace cpu {
++
++// Opaque and unique identifier for the host platform.
++// This is needed so that plugins can refer to/identify this platform without
++// instantiating a HostPlatform object.
++// This is broken out here to avoid a circular dependency between HostPlatform
++// and HostStreamExecutor.
++extern const Platform::Id kPlaidmlCpuPlatformId;
++
++}  // namespace cpu
++}  // namespace stream_executor
++
++#endif  // TENSORFLOW_STREAM_EXECUTOR_PLAIDML_CPU_PLATFORM_ID_H_
+diff --git a/tensorflow/compiler/xla/pjrt/BUILD b/tensorflow/compiler/xla/pjrt/BUILD
+index 6e85dca3855..f7d7a5ee0f3 100644
+--- a/tensorflow/compiler/xla/pjrt/BUILD
++++ b/tensorflow/compiler/xla/pjrt/BUILD
+@@ -349,6 +349,22 @@ cc_library(
+     ]) + if_nccl([":nccl_plugin"]),
+ )
+ 
++cc_library(
++    name = "plaidml_cpu_device",
++    srcs = ["plaidml_cpu_device.cc"],
++    hdrs = ["plaidml_cpu_device.h", "plaidml_device.h"],
++    compatible_with = [],
++    visibility = [":friends"],
++    deps = [
++        ":pjrt_stream_executor_client",
++        "//tensorflow/compiler/xla:statusor",
++        "//tensorflow/compiler/xla/client:client_library",
++        "//tensorflow/compiler/xla/plugin:plugin",
++        "//tensorflow/compiler/xla/service:platform_util",
++        "@com_google_absl//absl/strings",
++    ],
++)
++
+ # We actually wish we could write if_cuda(if_nccl(...)) in :gpu_device,
+ # but Bazel does not allow nested selects. We can work around the problem using
+ # an intermediate library.
+diff --git a/tensorflow/compiler/xla/pjrt/pjrt_client.h b/tensorflow/compiler/xla/pjrt/pjrt_client.h
+index ce5c0c54d64..e6ac149eb21 100644
+--- a/tensorflow/compiler/xla/pjrt/pjrt_client.h
++++ b/tensorflow/compiler/xla/pjrt/pjrt_client.h
+@@ -67,6 +67,10 @@ inline const char* TpuName() {
+   static constexpr char kTpuName[] = "tpu";
+   return kTpuName;
+ }
++inline const char* PlaidmlCpuName() {
++  static constexpr char kPlaidmlCpuName[] = "plaidml_cpu";
++  return kPlaidmlCpuName;
++}
+ inline PjRtPlatformId CpuId() {
+   static const PjRtPlatformId kCpuId = tensorflow::Fingerprint64(CpuName());
+   return kCpuId;
+@@ -79,6 +83,10 @@ inline PjRtPlatformId TpuId() {
+   static const PjRtPlatformId kTpuId = tensorflow::Fingerprint64(TpuName());
+   return kTpuId;
+ }
++inline PjRtPlatformId PlaidmlCpuId() {
++  static const PjRtPlatformId kPlaidmlCpuId = tensorflow::Fingerprint64(PlaidmlCpuName());
++  return kPlaidmlCpuId;
++}
+ 
+ enum PjRtRuntimeType { kStreamExecutor, kTfrt };
+ inline constexpr absl::string_view PjRtRuntimeTypeString(PjRtRuntimeType type) {
+diff --git a/tensorflow/compiler/xla/pjrt/plaidml_cpu_device.cc b/tensorflow/compiler/xla/pjrt/plaidml_cpu_device.cc
+new file mode 100644
+index 00000000000..5115d74d614
+--- /dev/null
++++ b/tensorflow/compiler/xla/pjrt/plaidml_cpu_device.cc
+@@ -0,0 +1,68 @@
++/* Copyright 2020 The TensorFlow Authors. All Rights Reserved.
++
++Licensed under the Apache License, Version 2.0 (the "License");
++you may not use this file except in compliance with the License.
++You may obtain a copy of the License at
++
++    http://www.apache.org/licenses/LICENSE-2.0
++
++Unless required by applicable law or agreed to in writing, software
++distributed under the License is distributed on an "AS IS" BASIS,
++WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++See the License for the specific language governing permissions and
++limitations under the License.
++==============================================================================*/
++
++#include "tensorflow/compiler/xla/pjrt/plaidml_cpu_device.h"
++
++#include "absl/strings/str_cat.h"
++#include "tensorflow/compiler/xla/client/client_library.h"
++#include "tensorflow/compiler/xla/pjrt/pjrt_stream_executor_client.h"
++#include "tensorflow/compiler/xla/service/platform_util.h"
++
++namespace xla {
++
++static const char kPlaidmlCpuPlatformName[] = "plaidml_cpu";
++
++PlaidmlCpuDevice::PlaidmlCpuDevice(int id,
++                     std::unique_ptr<LocalDeviceState> local_device_state)
++    : PlaidmlDevice(id, std::move(local_device_state),
++                               /*device_kind=*/kPlaidmlCpuPlatformName) {}
++
++StatusOr<std::unique_ptr<PjRtClient>> GetPlaidmlCpuClient(bool asynchronous) {
++  TF_ASSIGN_OR_RETURN(se::Platform * platform,
++                      PlatformUtil::GetPlatform("PlaidmlCpu"));
++  if (platform->VisibleDeviceCount() <= 0) {
++    return FailedPrecondition("PlaidML CPU platform has no visible devices.");
++  }
++  LocalClientOptions options;
++  options.set_platform(platform);
++  TF_ASSIGN_OR_RETURN(LocalClient * client,
++                      ClientLibrary::GetOrCreateLocalClient(options));
++
++  std::vector<std::unique_ptr<PjRtStreamExecutorDevice>> devices;
++  for (int i = 0; i < client->device_count(); ++i) {
++    se::StreamExecutorConfig config;
++    config.ordinal = i;
++    // 8MiB stacks seem to be necessary for running LAPACK/OpenBLAS
++    // computations.
++    config.device_options.non_portable_tags["host_thread_stack_size_in_bytes"] =
++        absl::StrCat(8192 * 1024);
++    TF_ASSIGN_OR_RETURN(se::StreamExecutor * executor,
++                        platform->GetExecutor(config));
++    auto device_state = absl::make_unique<LocalDeviceState>(
++        executor, client, LocalDeviceState::kSynchronous,
++        /*max_inflight_computations=*/32,
++        /*allow_event_reuse=*/false, /*use_callback_stream=*/false);
++    auto device = absl::make_unique<PlaidmlCpuDevice>(i, std::move(device_state));
++    devices.push_back(std::move(device));
++  }
++
++  return std::unique_ptr<PjRtClient>(std::make_unique<PjRtStreamExecutorClient>(
++      PlaidmlCpuName(), client, std::move(devices), /*process_index=*/0,
++      /*allocator=*/nullptr, /*host_memory_allocator=*/nullptr,
++      /*should_stage_host_to_device_transfers=*/false,
++      /*gpu_run_options=*/nullptr));
++}
++
++}  // namespace xla
+diff --git a/tensorflow/compiler/xla/pjrt/plaidml_cpu_device.h b/tensorflow/compiler/xla/pjrt/plaidml_cpu_device.h
+new file mode 100644
+index 00000000000..2223cbb3a4d
+--- /dev/null
++++ b/tensorflow/compiler/xla/pjrt/plaidml_cpu_device.h
+@@ -0,0 +1,33 @@
++/* Copyright 2020 The TensorFlow Authors. All Rights Reserved.
++
++Licensed under the Apache License, Version 2.0 (the "License");
++you may not use this file except in compliance with the License.
++You may obtain a copy of the License at
++
++    http://www.apache.org/licenses/LICENSE-2.0
++
++Unless required by applicable law or agreed to in writing, software
++distributed under the License is distributed on an "AS IS" BASIS,
++WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++See the License for the specific language governing permissions and
++limitations under the License.
++==============================================================================*/
++
++#ifndef TENSORFLOW_COMPILER_XLA_PJRT_PLAIDML_CPU_DEVICE_H_
++#define TENSORFLOW_COMPILER_XLA_PJRT_PLAIDML_CPU_DEVICE_H_
++
++#include "tensorflow/compiler/xla/pjrt/plaidml_device.h"
++
++namespace xla {
++
++class PlaidmlCpuDevice : public PlaidmlDevice {
++ public:
++  PlaidmlCpuDevice(int id,
++                   std::unique_ptr<LocalDeviceState> local_device_state);
++};
++
++StatusOr<std::unique_ptr<PjRtClient>> GetPlaidmlCpuClient(bool asynchronous);
++
++}  // namespace xla
++
++#endif  // TENSORFLOW_COMPILER_XLA_PJRT_PLAIDML_CPU_DEVICE_H_
+diff --git a/tensorflow/compiler/xla/pjrt/plaidml_device.h b/tensorflow/compiler/xla/pjrt/plaidml_device.h
+new file mode 100644
+index 00000000000..292791a5783
+--- /dev/null
++++ b/tensorflow/compiler/xla/pjrt/plaidml_device.h
+@@ -0,0 +1,35 @@
++/* Copyright 2020 The TensorFlow Authors. All Rights Reserved.
++
++Licensed under the Apache License, Version 2.0 (the "License");
++you may not use this file except in compliance with the License.
++You may obtain a copy of the License at
++
++    http://www.apache.org/licenses/LICENSE-2.0
++
++Unless required by applicable law or agreed to in writing, software
++distributed under the License is distributed on an "AS IS" BASIS,
++WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++See the License for the specific language governing permissions and
++limitations under the License.
++==============================================================================*/
++
++#ifndef TENSORFLOW_COMPILER_XLA_PJRT_PLAIDML_DEVICE_H_
++#define TENSORFLOW_COMPILER_XLA_PJRT_PLAIDML_DEVICE_H_
++
++#include <memory>
++
++#include "tensorflow/compiler/xla/pjrt/pjrt_stream_executor_client.h"
++#include "tensorflow/compiler/xla/statusor.h"
++
++namespace xla {
++
++class PlaidmlDevice : public PjRtStreamExecutorDevice {
++ public:
++  PlaidmlDevice(int id, std::unique_ptr<LocalDeviceState> local_device_state,
++                std::string device_kind)
++      : PjRtStreamExecutorDevice(id, local_device_state, device_kind){};
++};
++
++}  // namespace xla
++
++#endif  // TENSORFLOW_COMPILER_XLA_PJRT_PLAIDML_DEVICE_H_
+diff --git a/tensorflow/compiler/xla/python/BUILD b/tensorflow/compiler/xla/python/BUILD
+index f2b1da865ec..fd92edb092f 100644
+--- a/tensorflow/compiler/xla/python/BUILD
++++ b/tensorflow/compiler/xla/python/BUILD
+@@ -441,6 +441,7 @@ tf_cc_test(
+         "//tensorflow/compiler/xla/client:executable_build_options",
+         "//tensorflow/compiler/xla/client:xla_builder",
+         "//tensorflow/compiler/xla/pjrt:cpu_device",
++        "//tensorflow/compiler/xla/pjrt:plaidml_cpu_device",
+         "//tensorflow/compiler/xla/pjrt:pjrt_client",
+         "//tensorflow/compiler/xla/pjrt:pjrt_stream_executor_client",
+         "//tensorflow/compiler/xla/service:platform_util",
+@@ -668,6 +669,7 @@ pybind_extension(
+         "//tensorflow/compiler/xla:types",
+         "//tensorflow/compiler/xla:util",
+         "//tensorflow/compiler/xla/pjrt:cpu_device",
++        "//tensorflow/compiler/xla/pjrt:plaidml_cpu_device",
+         "//tensorflow/compiler/xla/pjrt:interpreter_device",
+         "//tensorflow/compiler/xla/pjrt:gpu_device",
+         "//tensorflow/compiler/xla/pjrt:pjrt_client",
+@@ -677,6 +679,7 @@ pybind_extension(
+         "//tensorflow/compiler/xla/pjrt/distributed:client",
+         "//tensorflow/compiler/xla/pjrt/distributed:service",
+         "//tensorflow/core:lib",
++        "//tensorflow/compiler/plugin:plugin",
+         # Do NOT remove this dependency. The XLA Python extension must not
+         # depend on any part of TensorFlow at runtime, **including**
+         # libtensorflow_framework.so. The XLA module is deployed self-contained
+diff --git a/tensorflow/compiler/xla/python/xla.cc b/tensorflow/compiler/xla/python/xla.cc
+index 31a3f74a00d..0d56c4c56c1 100644
+--- a/tensorflow/compiler/xla/python/xla.cc
++++ b/tensorflow/compiler/xla/python/xla.cc
+@@ -194,6 +194,12 @@ PYBIND11_MODULE(xla_extension, m) {
+             absl::StrJoin(device.coords(), ","), device.core_on_chip());
+       });
+ 
++      py::class_<PlaidmlCpuDevice, PjRtDevice, ClientAndPtr<PlaidmlCpuDevice>>(
++      m, "PlaidmlCpuDevice")
++      .def("__repr__", [](const PlaidmlCpuDevice& device) {
++        return absl::StrFormat("PlaidmlCpuDevice(id=%i)", device.id());
++      });
++
+   // Local XLA client methods.
+ 
+   py::class_<GpuAllocatorConfig> alloc_config(m, "GpuAllocatorConfig");
+@@ -309,6 +315,15 @@ PYBIND11_MODULE(xla_extension, m) {
+         return std::make_shared<PyClient>(std::move(client));
+       },
+       py::arg("max_inflight_computations") = 32);
++  m.def(
++      "get_plaidml_cpu_client",
++      [](bool asynchronous) -> StatusOr<std::shared_ptr<PyClient>> {
++        py::gil_scoped_release gil_release;
++        TF_ASSIGN_OR_RETURN(std::unique_ptr<PjRtClient> client,
++                            GetPlaidmlCpuClient(asynchronous));
++        return std::make_shared<PyClient>(std::move(client));
++      },
++      py::arg("asynchronous") = true);
+ 
+   TF_CHECK_OK(PyBuffer::RegisterTypes(m));
+ 
+diff --git a/tensorflow/compiler/xla/python/xla_client.py b/tensorflow/compiler/xla/python/xla_client.py
+index bebf0c80902..a68f92bf82d 100644
+--- a/tensorflow/compiler/xla/python/xla_client.py
++++ b/tensorflow/compiler/xla/python/xla_client.py
+@@ -52,6 +52,7 @@ mlir_api_version = 2
+ xla_platform_names = {
+     'cpu': 'Host',
+     'gpu': 'CUDA',
++    'plaidml_cpu' : 'PlaidmlCpu',
+ }
+ 
+ 
+@@ -98,6 +99,8 @@ def make_gpu_client(distributed_client=None, node_id=0):
+ def make_tpu_client():
+   return _xla.get_tpu_client(max_inflight_computations=32)
+ 
++def make_plaidml_cpu_client():
++    return _xla.get_plaidml_cpu_client(asynchronous=True)
+ 
+ class OpMetadata:
+   """Python representation of a xla.OpMetadata protobuf."""
+diff --git a/tensorflow/compiler/xla/python/xla_client.pyi b/tensorflow/compiler/xla/python/xla_client.pyi
+index 67a7f4ab8d9..da15b4a01df 100644
+--- a/tensorflow/compiler/xla/python/xla_client.pyi
++++ b/tensorflow/compiler/xla/python/xla_client.pyi
+@@ -82,6 +82,8 @@ def make_interpreter_client() -> Client:
+ def make_tpu_client() -> Client:
+   ...
+ 
++def make_plaidml_cpu_client() -> Client:
++  ...
+ 
+ class OpMetadata:
+ 
+diff --git a/tensorflow/compiler/xla/python/xla_extension/__init__.pyi b/tensorflow/compiler/xla/python/xla_extension/__init__.pyi
+index 543adc6e739..b67fba85de6 100644
+--- a/tensorflow/compiler/xla/python/xla_extension/__init__.pyi
++++ b/tensorflow/compiler/xla/python/xla_extension/__init__.pyi
+@@ -300,6 +300,9 @@ class TpuDevice(Device):
+   core_on_chip: int
+   def __repr__(self) -> str: ...
+ 
++class PlaidmlCpuDevice(Device):
++  def __repr__(self) -> str: ...
++
+ class _GpuAllocatorKind(enum.IntEnum):
+     DEFAULT: int
+     PLATFORM: int
+@@ -382,6 +385,7 @@ def get_gpu_client(
+     distributed_client: Optional[DistributedRuntimeClient] = ...,
+     node_id: int = ...) -> Client:...
+ def get_tpu_client(max_inflight_computations: int = ...) -> Client: ...
++def get_plaidml_cpu_client(asynchronous: bool = ...) -> Client: ...
+ 
+ class DeviceArrayBase: ...
+ 
+diff --git a/tensorflow/stream_executor/platform.cc b/tensorflow/stream_executor/platform.cc
+index fce9a1c0cd2..89f2204fe5a 100644
+--- a/tensorflow/stream_executor/platform.cc
++++ b/tensorflow/stream_executor/platform.cc
+@@ -34,6 +34,8 @@ std::string PlatformKindString(PlatformKind kind) {
+       return "OpenCL";
+     case PlatformKind::kHost:
+       return "Host";
++    case PlatformKind::kPlaidmlCpu:
++      return "PlaidmlCpu";      
+     case PlatformKind::kMock:
+       return "Mock";
+     default:
+@@ -57,6 +59,7 @@ bool PlatformIsRunnable(PlatformKind kind) {
+     case PlatformKind::kROCm:
+     case PlatformKind::kOpenCL:
+     case PlatformKind::kHost:
++    case PlatformKind::kPlaidmlCpu:
+       return true;
+     default:
+       return false;
+@@ -68,6 +71,7 @@ bool PlatformIsRunnableOnDevice(PlatformKind kind) {
+     case PlatformKind::kCuda:
+     case PlatformKind::kROCm:
+     case PlatformKind::kOpenCL:
++    case PlatformKind::kPlaidmlCpu:
+       return true;
+     default:
+       return false;
+diff --git a/tensorflow/stream_executor/platform.h b/tensorflow/stream_executor/platform.h
+index 8f80ee837d0..e0af0f395d8 100644
+--- a/tensorflow/stream_executor/platform.h
++++ b/tensorflow/stream_executor/platform.h
+@@ -45,6 +45,7 @@ enum class PlatformKind {
+   kROCm,
+   kOpenCL,
+   kHost,
++  kPlaidmlCpu,
+   kMock,
+   kSize,
+ };
+diff --git a/tensorflow/stream_executor/stream_executor_pimpl.cc b/tensorflow/stream_executor/stream_executor_pimpl.cc
+index 17e3a53886c..b5fe340fa6e 100644
+--- a/tensorflow/stream_executor/stream_executor_pimpl.cc
++++ b/tensorflow/stream_executor/stream_executor_pimpl.cc
+@@ -159,6 +159,8 @@ StreamExecutor::StreamExecutor(
+     platform_kind_ = PlatformKind::kOpenCL;
+   } else if (name == "host") {
+     platform_kind_ = PlatformKind::kHost;
++  } else if (name == "plaidmlcpu") {
++    platform_kind_ = PlatformKind::kPlaidmlCpu;
+   } else {
+     platform_kind_ = PlatformKind::kInvalid;
+   }
