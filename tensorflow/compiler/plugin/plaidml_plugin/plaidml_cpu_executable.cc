@@ -17,6 +17,7 @@ limitations under the License.
 
 #include "plaidml_cpu_executor.h"
 #include "plaidml_cpu_stream.h"
+#include "runtime_tracing.h"
 #include "tensorflow/compiler/xla/literal.h"
 #include "tensorflow/compiler/xla/service/buffer_assignment.h"
 #include "tensorflow/compiler/xla/service/computation_layout.h"
@@ -44,15 +45,16 @@ limitations under the License.
 #include "tensorflow/stream_executor/platform.h"
 #include "tensorflow/stream_executor/stream.h"
 #include "tensorflow/stream_executor/stream_executor_pimpl.h"
-#include "runtime_tracing.h"
 namespace xla {
 namespace cpu {
 
-// Note: in this file, we follow tensorflow/compiler/xla/service/cpu/cpu_executable.cc,
-// and plaidml/core/core.h, instead of the Habana code, because this part is specific to
-// device and compiler.
+// Note: in this file, I followed
+// tensorflow/compiler/xla/service/cpu/cpu_executable.cc,
+// and plaidml/core/core.h, instead of the Habana code, because this part is
+// specific to device and compiler.
 
-plaidml::TensorShape CreatPlaidmlTensorShape(PrimitiveType xla_type, const xla::Shape &shape) {
+plaidml::TensorShape CreatPlaidmlTensorShape(PrimitiveType xla_type,
+                                             const xla::Shape& shape) {
   plaidml::DType plaidml_type = XlaTypeToPlaidmlType(xla_type);
   std::vector<int64_t> sizes;
   for (int i = 0; i < shape.rank(); i++) {
@@ -62,59 +64,66 @@ plaidml::TensorShape CreatPlaidmlTensorShape(PrimitiveType xla_type, const xla::
   return std::move(plaidml_tensor_shape);
 }
 
-StatusOr<std::vector<plaidml::Buffer>> CreatePlaidmlInputBuffers(const std::vector<ExecutionInput> &arguments) {
+StatusOr<std::vector<plaidml::Buffer>> CreatePlaidmlInputBuffers(
+    const std::vector<ExecutionInput>& arguments) {
   VLOG(2) << "recieved " << arguments.size() << " arguments (execution inputs)";
   std::vector<plaidml::Buffer> plaidml_input_buffers;
   plaidml_input_buffers.reserve(arguments.size());
   for (auto& argument : arguments) {
-      const ShapeTree<MaybeOwningDeviceMemory>& buffers = argument.Buffers();
-      xla::Shape = buffers.shape();
-      plaidml::DType plaidml_type = xlaTypeToPlaidmlType(shape.element_type());
-      auto in_it = buffers.begin();
-      unit num_nodes = 0;
-      for (; in_it != buffers.end(); ++in_it) {
-        num_nodes++;
-      }
-      if (num_nodes != 1) {
-        return InternalError("Plaidml expects 1 buffer per argument");
-      }
-      const Shape& shape = in_it->second
-      se::DeviceMemoryBase device_memopry_base = in_it->second.AsDeviceMemoryBase();
-      char* data = (char *)device_memopry_base.opaque();
-      size_t size = (size_t) device_memopry_base.size();
-      plaidml::TensorShape plaidml_shape= CreatPlaidmlTensorShape(xt, argumentshape);  
-      plaidml::Buffer plaidml_buffer(data, size, plaidml_shape);
-      plaidml_input_buffers.push_back(plaidml_buffer);
+    const ShapeTree<MaybeOwningDeviceMemory>& buffers = argument.Buffers();
+    xla::Shape shape = buffers.shape();
+    xla::PrimitiveType xla_type = shape.element_type();
+    auto itr = buffers.begin();
+    unit num_nodes = 0;
+    for (; itr != buffers.end(); ++itr) {
+      num_nodes++;
+    }
+    if (num_nodes != 1) {
+      return InternalError("Plaidml expects 1 buffer per argument");
+    }
+    se::DeviceMemoryBase device_memopry_base = itr->second.AsDeviceMemoryBase();
+    char* data = (char*)device_memopry_base.opaque();
+    size_t size = (size_t)device_memopry_base.size();
+    plaidml::TensorShape plaidml_shape =
+        CreatPlaidmlTensorShape(xla_type, shape);
+    plaidml::Buffer plaidml_buffer(data, size, plaidml_shape);
+    plaidml_input_buffers.emplace_back(plaidml_buffer);
   }
   return std::move(plaidml_input_buffers);
 }
 
-std::vector<plaidml::Buffer> CreatePlaidmlOutputBuffers(ScopedShapedBuffer* result_, const xla::Shape& result_shape) {
+std::vector<plaidml::Buffer> CreatePlaidmlOutputBuffers(
+    ScopedShapedBuffer* result_, const xla::Shape& result_shape) {
   std::vector<plaidml::Buffer> plaidml_output_buffers;
   const ShapeTree<se::DeviceMemoryBase>& shape_tree = result_->buffers();
-  xla::Shape = shape_tree.shape();
+  xla::Shape shape = shape_tree.shape();
   xla::PrimitiveType xla_type = shape.element_type();
   plaidml::DType plaidml_type = xlaTypeToPlaidmlType();
-
   for (auto& p : shape_tree) {
     const ShapeIndex& index = p.first;
-    const ShapeTree<se::DeviceMemoryBase>& sub_tree = shape_tree.SubShapeTree(index);
+    const ShapeTree<se::DeviceMemoryBase>& sub_tree =
+        shape_tree.SubShapeTree(index);
     const Shape& sub_tree_shape = sub_tree.shape();
-    const se::DeviceMemoryBase& device_memopry_base = p.second.AsDeviceMemoryBase();
-    char* data = (char *)device_memopry_base.opaque();
-    size_t size = (size_t) device_memopry_base.size();
-    plaidml::TensorShape plaidml_shape= CreatPlaidmlTensorShape(xla_type, sub_tree_shape);  
-      plaidml::Buffer plaidml_buffer(data, size, plaidml_shape);
-      plaidml_output_buffers.push_back(plaidml_buffer);
+    const se::DeviceMemoryBase& device_memopry_base =
+        p.second.AsDeviceMemoryBase();
+    char* data = (char*)device_memopry_base.opaque();
+    size_t size = (size_t)device_memopry_base.size();
+    plaidml::TensorShape plaidml_shape =
+        CreatPlaidmlTensorShape(xla_type, sub_tree_shape);
+    plaidml::Buffer plaidml_buffer(data, size, plaidml_shape);
+    plaidml_output_buffers.push_back(plaidml_buffer);
   }
 
   return std::move(plaidml_output_buffers);
 }
 
-PlaidmlCpuExecutable::PlaidmlCpuExecutable(std::unique_ptr<HloModule> hlo_module)
-    : Executable(std::move(hlo_module), /*hlo_profile_printer_data=*/nullptr,
-                 /*hlo_profile_index_map=*/nullptr) {}
+PlaidmlCpuExecutable::PlaidmlCpuExecutable(
+    std::unique_ptr<HloModule> hlo_module)
+    : CpuExecutable(std::move(hlo_module), /*hlo_profile_printer_data=*/nullptr,
+                    /*hlo_profile_index_map=*/nullptr) {}
 
+// This function is coined with CpuExecutable::ExecuteAsyncOnStream as
+// a reference.
 StatusOr<ExecutionOutput> PlaidmlCpuExecutable::ExecuteAsyncOnStream(
     const ServiceExecutableRunOptions* run_options,
     std::vector<ExecutionInput> arguments,
@@ -154,18 +163,23 @@ StatusOr<ExecutionOutput> PlaidmlCpuExecutable::ExecuteAsyncOnStream(
       CreateResultShapedBuffer(run_options, absl::MakeSpan(buffers),
                                absl::MakeSpan(arguments)));
 
-  //HloInstruction* root = hlo_module_->entry_computation()->root_instruction();
-  //const Shape& root_shape = root->shape();
+  // HloInstruction* root =
+  // hlo_module_->entry_computation()->root_instruction();
+  // const Shape& root_shape = root->shape();
 
   // Now wrap the inputs and outputs into plaidml buffers and run the program.
-  std::vector<plaidml::Buffer> plaidml_input_buffers = CreatePlaidmlInputBuffers(arguments);
+  std::vector<plaidml::Buffer> plaidml_input_buffers =
+      CreatePlaidmlInputBuffers(arguments);
   ScopedShapedBuffer* result_ = result.MutableResult();
-  const xla::Shape& result_shape = this->result_shape(); 
-  std::vector<plaidml::Buffer> plaidml_output_buffers = CreatePlaidmlOutputBuffers(result_, result_shape);
-    
+  const xla::Shape& result_shape = this->result_shape();
+  std::vector<plaidml::Buffer> plaidml_output_buffers =
+      CreatePlaidmlOutputBuffers(result_, result_shape);
+
   RecipeInfo& recipe_info = this->getRecipeInfo();
-  //std::unique_ptr<plaidml::compiler::Program> plaidml_program = recipe_info.plaidml_program;
-  std::unique_ptr<plaidml::exec::Executable> plaidml_exe = recipe_info.plaidml_exe;
+  // std::unique_ptr<plaidml::compiler::Program> plaidml_program =
+  // recipe_info.plaidml_program;
+  std::unique_ptr<plaidml::exec::Executable> plaidml_exe =
+      recipe_info.plaidml_exe;
 
   struct AsyncRunTask {
     plaidml::exec::Executable* plaidml_exe;
@@ -173,18 +187,21 @@ StatusOr<ExecutionOutput> PlaidmlCpuExecutable::ExecuteAsyncOnStream(
     std::vector<plaidml::Buffer> plaidml_output_buffers;
     Status operator()() {
       try {
-        double exec_time = plaidml_exe->run(plaidml_input_buffers, plaidml_output_buffers);
+        double exec_time =
+            plaidml_exe->run(plaidml_input_buffers, plaidml_output_buffers);
         VLOG(1) << "Execution time = " << exec_time << " ms\n";
       } catch (...) {
-        return xla::Status(tensorflow::error::Code::ABORTED, "Error in executing Plaidml executable");         
+        return xla::Status(tensorflow::error::Code::ABORTED,
+                           "Error in executing Plaidml executable");
       }
     }
   };
   host_stream->EnqueueTaskWithStatus(
       AsyncRunTask{plaidml_exe, plaidml_input_buffers, plaidml_output_buffers});
 
-  // Since the result's memory is shared by the two variables: "plaidml_output_buffers" and "result",
-  // the execution of the task should have changed the memory of "plaidml_output_buffers" and thus 
+  // Since the result's memory is shared by the two variables:
+  // "plaidml_output_buffers" and "result", the execution of the task should
+  // have changed the memory of "plaidml_output_buffers" and thus
   // of "result". Now return the "result".
   MarkToBeReleasedArguments(absl::MakeSpan(arguments), result);
   return std::move(result);

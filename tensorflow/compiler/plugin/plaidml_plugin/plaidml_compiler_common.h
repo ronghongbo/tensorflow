@@ -52,10 +52,10 @@ using TensorBuffers = std::vector<MultiBuffer>;
 struct RecipeInfo {
   RecipeInfo(const RecipeInfo& r) { *this = r; }
   RecipeInfo() {}
-  std::unique_ptr<plaidml::plaidml::compiler::Program > plaidml_program = nullptr;
+  std::unique_ptr<plaidml::Program > plaidml_program = nullptr;
   std::unique_ptr<plaidml::exec::Executable> plaidml_exe = nullptr;
-  TensorBuffers inputs;
-  TensorBuffers outputs;
+//  TensorBuffers inputs;
+//  TensorBuffers outputs;
 };
 
 #define ELEMENTS_ATTR_TO_LITERAL(xla_type, plaidml_type) \

@@ -59,3 +59,11 @@ To copy tensorflow changes to the Jax directory for bazel build there:
   ..... # Copy other files we added/changed as well. 
 TODO: there should be a better way: without manually copying the files from tensorflow to Jax, we may tell Jax where the local tensorflow is.
 
+To auto-format:
+    make a file: auto-format.sh
+        clang-format --style=google  $1  > a.h
+        mv a.h $1
+    Then
+        chmod a+x auto-format.sh
+    Then 
+        ./auto-format.sh fileName
