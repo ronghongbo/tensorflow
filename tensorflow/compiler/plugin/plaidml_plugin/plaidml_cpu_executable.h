@@ -22,6 +22,7 @@ limitations under the License.
 #include <vector>
 
 #include "absl/types/span.h"
+#include "plaidml/pmlc/compiler/program.h"
 #include "tensorflow/compiler/xla/service/buffer_assignment.h"
 #include "tensorflow/compiler/xla/service/cpu/simple_orc_jit.h"
 #include "tensorflow/compiler/xla/service/custom_call_status_internal.h"
@@ -35,12 +36,14 @@ limitations under the License.
 #include "tensorflow/compiler/xla/types.h"
 #include "tensorflow/core/platform/stream_executor_no_cuda.h"
 #include "tensorflow/stream_executor/device_memory_allocator.h"
-#include "plaidml/pmlc/compiler/program.h"
 
 namespace xla {
 namespace cpu {
 
-class PlaidmlCpuExecutable : public CpuExecutable {
+// Here I inherit from Executable instead of CpuExecutable, because
+// CpuExecutable's constructor requires a SimpleOrcJIT as an argument, but
+// Plaidml compiler is not a SimpleOrcJIT.
+class PlaidmlCpuExecutable : public Executable {
  public:
   explicit PlaidmlCpuExecutable(std::unique_ptr<HloModule> hlo_module);
 
@@ -49,13 +52,13 @@ class PlaidmlCpuExecutable : public CpuExecutable {
       std::vector<ExecutionInput> arguments,
       HloExecutionProfile* hlo_execution_profile) override;
   static int64_t ShapeSizeBytes(const Shape& shape);
-  RecipeInfo& getRecipeInfo(){return recipe_info_;}
+  RecipeInfo& getRecipeInfo() { return recipe_info_; }
   void setRecipeInfo(RecipeInfo& recipe_info) { recipe_info_ = recipe_info; }
 
  private:
-      RecipeInfo recipe_info_;
+  RecipeInfo recipe_info_;
 
- TF_DISALLOW_COPY_AND_ASSIGN(PlaidmlCpuExecutable);
+  TF_DISALLOW_COPY_AND_ASSIGN(PlaidmlCpuExecutable);
 };
 
 }  // namespace cpu

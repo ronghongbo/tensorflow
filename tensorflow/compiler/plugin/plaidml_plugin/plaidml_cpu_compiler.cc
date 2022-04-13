@@ -90,6 +90,7 @@ limitations under the License.
 #include "tensorflow/compiler/mlir/xla/hlo_to_mlir_hlo.h"
 #include "tensorflow/compiler/mlir/xla/ir/xla_framework.h"
 #include "tensorflow/compiler/mlir/xla/transforms/xla_passes.h"
+#include "tensorflow/compiler/plugin/plaidml_plugin/plaidml_cpu_executable.h"
 #include "tensorflow/compiler/xla/cpu_function_runtime.h"
 #include "tensorflow/compiler/xla/literal.h"
 #include "tensorflow/compiler/xla/map_util.h"
@@ -186,11 +187,10 @@ limitations under the License.
 #include "tensorflow/core/platform/errors.h"
 #include "tensorflow/core/platform/status.h"
 #include "tensorflow/core/protobuf/error_codes.pb.h"
-#include "tensorflow/compiler/plugin/plaidml_plugin/plaidml_cpu_executable.h"
 
 // Include two data structures of Plaidml compiler: Program and Executable
-#include "plaidml/exec/exec.h"
 #include "plaidml/compiler/program.h"
+#include "plaidml/exec/exec.h"
 
 namespace xla {
 namespace cpu {
@@ -314,15 +314,30 @@ Status PlaidmlCpuCompiler::LowerMLIRModuleToLinalg(
 }
 
 RecipeInfo PlaidmlCpuCompiler::CompileLinalgToExecutable(
-   OwningModuleRef mlir_module) {
-    RecipeInfo recipe_info;
-    std::unique_ptr<plaidml::compiler::Program> plaidml_program = make_unique<plaidml::compiler::Program>(mlir_module);
-    auto dump_dir = pmlc::util::getEnvVar("PLAIDML_DUMP");
-    plaidml_program.compile("llvm_cpu", /*collectPasses*/true, dump_dir);    
-    std::unique_ptr<plaidml::exec::Executable> plaidml_exe = make_unique<plaidml::exec::Executable>(plaidml_program);
-    recipe_info.plaidml_program = std::move(plaidml_program);
-    recipe_info.plaidml_exe = std::move(plaidml_exe);
-    return std::move(recipe_info);
+    OwningModuleRef mlir_module) {
+  RecipeInfo recipe_info;
+
+  // The construction of plaidml::Program is not as smooth as it should be.
+  // Maybe we should modify Plaidml interface a little bit to make this easy.
+  std::shared_ptr<pmlc::compiler::Program> p1 =
+      std::make_shared<pmlc::compiler::Program>(mlir_module);
+  struct plaidml_program p2 = { p1;
+}
+std::unique_ptr<struct plaidml_program> p3 =
+    std::make_unique<struct plaidml_program>(p2);
+std::unique_ptr<plaidml::Program> plaidml_program =
+    std::make_unique<plaidml::Program>(p3);
+
+// Compilation, which modifies the mlir_module in place.
+auto dump_dir = pmlc::util::getEnvVar("PLAIDML_DUMP");
+plaidml_program->compile("llvm_cpu", /*collectPasses*/ true, dump_dir);
+
+// Make an executable.
+std::unique_ptr<plaidml::exec::Executable> plaidml_exe =
+    make_unique<plaidml::exec::Executable>(*plaidml_program);
+recipe_info.plaidml_program = std::move(plaidml_program);
+recipe_info.plaidml_exe = std::move(plaidml_exe);
+return std::move(recipe_info);
 }
 
 StatusOr<std::unique_ptr<Executable>> PlaidmlCpuCompiler::RunBackend(
@@ -351,19 +366,22 @@ StatusOr<std::unique_ptr<Executable>> PlaidmlCpuCompiler::RunBackend(
   DumpMlirToFile(*hlo_module, "mhlo", mlir_module.get());
 
   // Convert MLIR HLO into MLIR Linalg
-  LowerMLIRModuleToLinalg(hlo_module, mlir_module, compileroptions);
+  LowerMLIRModuleToLinalg(hlo_module, mlir_module, options);
 
-  // Invoke PlaidML compiler to compile MLIR Linalg into an executable 
+  // Invoke PlaidML compiler to compile MLIR Linalg into an executable,
+  // which is recorded in an recipe.
   VLOG(2) << "Generating executable with PlaidML compiler";
   auto recipeInfo = CompileLinalgToExecutable(mlir_module.release());
   if (!recipeInfo) {
-    return InternalError("%s",llvm::toString(recipeInfo.takeError()));
+    return InternalError("%s", llvm::toString(recipeInfo.takeError()));
   }
 
-  // Create a PlaidmlCpuExecutable struct that contains two pieces of info: hlo_module and the recipe 
+  // Create a PlaidmlCpuExecutable struct that contains two pieces of info:
+  // hlo_module and the recipe
   std::unique_ptr<Executable> executable =
       absl::make_unique<PlaidmlCpuExecutable>(std::move(hlo_module));
-  PlaidmlCpuExecutable* exec = dynamic_cast<PlaidmlCpuExecutable*>(executable.get());
+  PlaidmlCpuExecutable* exec =
+      dynamic_cast<PlaidmlCpuExecutable*>(executable.get());
   exec->setRecipeInfo(*recipeInfo);
 
   return std::move(executable);
@@ -371,10 +389,6 @@ StatusOr<std::unique_ptr<Executable>> PlaidmlCpuCompiler::RunBackend(
 
 se::Platform::Id PlaidmlCpuCompiler::PlatformId() const {
   return se::host::kPlaidmlCpuPlatformId;
-}
-
-HloCostAnalysis::ShapeSizeFunction CpuCompiler::ShapeSizeBytesFunction() const {
-  return PlaidmlCpuExecutable::ShapeSizeBytes;
 }
 
 }  // namespace cpu
